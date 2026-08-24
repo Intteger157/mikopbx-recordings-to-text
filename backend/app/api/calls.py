@@ -21,7 +21,7 @@ from app.schemas import (
 )
 from app.services.call_service import apply_call_rbac_filter, get_call_for_user
 from app.services.sync_service import get_pbx_client
-from app.tasks.transcription import transcribe_call
+from app.tasks.celery_app import celery_app
 
 router = APIRouter(prefix="/api/calls", tags=["calls"])
 
@@ -187,7 +187,7 @@ async def enqueue_transcription(
 
     await db.commit()
     await db.refresh(transcription)
-    transcribe_call.delay(transcription.id)
+    celery_app.send_task("transcribe_call", args=[transcription.id])
     return TranscriptionEnqueueResponse(transcription_id=transcription.id, status=transcription.status)
 
 

@@ -47,8 +47,8 @@ services:
         ]
       interval: 5s
       timeout: 5s
-      retries: 12
-      start_period: 30s
+      retries: 20
+      start_period: 60s
     depends_on:
       postgres:
         condition: service_healthy
@@ -58,7 +58,7 @@ services:
   celery-worker:
     build: ./backend
     restart: unless-stopped
-    command: celery -A app.tasks.celery_app worker --loglevel=info --concurrency=1
+    command: sh -c "celery -A app.tasks.celery_app worker --loglevel=info --concurrency=1"
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-whisper}:${POSTGRES_PASSWORD:-whisper}@postgres:5432/${POSTGRES_DB:-whisper}
       DATABASE_URL_SYNC: postgresql+psycopg2://${POSTGRES_USER:-whisper}:${POSTGRES_PASSWORD:-whisper}@postgres:5432/${POSTGRES_DB:-whisper}

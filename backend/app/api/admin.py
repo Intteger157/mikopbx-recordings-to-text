@@ -16,7 +16,7 @@ from app.schemas import (
     PBXSyncResponse,
 )
 from app.services.sync_service import get_pbx_client, sync_cdr, sync_extensions
-from app.tasks.sync import sync_pbx_task
+from app.tasks.celery_app import celery_app
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -106,7 +106,10 @@ async def trigger_pbx_sync_async(
     payload: PBXSyncRequest,
     _: User = Depends(require_roles(UserRole.SUPERADMIN)),
 ):
-    sync_pbx_task.delay(payload.date_from.isoformat(), payload.date_to.isoformat())
+    celery_app.send_task(
+        "sync_pbx",
+        args=[payload.date_from.isoformat(), payload.date_to.isoformat()],
+    )
     return {"success": True, "message": "Sync job queued"}
 
 
