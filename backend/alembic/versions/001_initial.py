@@ -18,9 +18,9 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    user_role = sa.Enum("SUPERADMIN", "MANAGER", "USER", name="user_role")
+    user_role = sa.Enum("SUPERADMIN", "MANAGER", "USER", name="user_role", create_type=False)
     transcription_status = sa.Enum(
-        "PENDING", "PROCESSING", "COMPLETED", "FAILED", name="transcription_status"
+        "PENDING", "PROCESSING", "COMPLETED", "FAILED", name="transcription_status", create_type=False
     )
     user_role.create(op.get_bind(), checkfirst=True)
     transcription_status.create(op.get_bind(), checkfirst=True)
