@@ -14,7 +14,7 @@ from app.database import async_session
 from app.database_sync import sync_session
 from app.models import Transcription
 from app.models.enums import TranscriptionStatus
-from app.services.recording_service import resolve_call_audio_url
+from app.services.recording_service import fetch_call_recording
 from app.services.sync_service import get_pbx_client
 from app.tasks.celery_app import celery_app
 from app.tasks.celery_async import run_async_task
@@ -62,17 +62,12 @@ async def _run_transcription(transcription_id: int) -> None:
             if not client:
                 raise RuntimeError("MikoPBX is not configured")
 
-            audio_url = await resolve_call_audio_url(db, client, call)
-            suffix = Path(audio_url.split("?", 1)[0]).suffix or ".webm"
+            audio_bytes, _ = await fetch_call_recording(db, client, call, read_timeout=45.0)
+
+            suffix = Path(call.recordingfile or "").suffix or ".webm"
             temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
             temp_path = Path(temp_file.name)
             temp_file.close()
-            audio_bytes, _ = await client.fetch_recording_bytes(
-                audio_url,
-                recordingfile=call.recordingfile,
-                cdr_id=call.mikopbx_cdr_id,
-                read_timeout=45.0,
-            )
             temp_path.write_bytes(audio_bytes)
 
             model = get_whisper_model()

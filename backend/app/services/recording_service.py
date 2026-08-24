@@ -14,7 +14,7 @@ def _leg_uniqueid(leg: dict) -> str | None:
 
 
 def _leg_recording_url(leg: dict) -> str | None:
-    return leg.get("download_url") or leg.get("playback_url")
+    return MikoPBXClient.find_recording_url(leg)
 
 
 async def _lookup_cdr_leg(client: MikoPBXClient, call: CallRecord) -> dict | None:
@@ -34,6 +34,10 @@ async def _lookup_cdr_leg(client: MikoPBXClient, call: CallRecord) -> dict | Non
     for leg in legs:
         if _leg_uniqueid(leg) == call.uniqueid:
             return leg
+    if call.mikopbx_cdr_id:
+        for leg in legs:
+            if str(leg.get("id")) == str(call.mikopbx_cdr_id):
+                return leg
     return None
 
 
@@ -96,3 +100,47 @@ async def resolve_call_audio_url(
     if url:
         return url
     raise RuntimeError("Call recording URL is missing")
+
+
+def _is_expired_token_error(message: str) -> bool:
+    lowered = message.lower()
+    return "expired" in lowered or "invalid or expired playback token" in lowered
+
+
+async def fetch_call_recording(
+    db: AsyncSession,
+    client: MikoPBXClient,
+    call: CallRecord,
+    read_timeout: float = 60.0,
+    max_urls: int | None = None,
+) -> tuple[bytes, str | None]:
+    """Download a call recording, renewing the playback token once if needed.
+
+    MikoPBX playback tokens are short lived, so a token stored at sync time is
+    usually rejected by the time somebody opens the call.
+    """
+    audio_url = await resolve_call_audio_url(db, client, call)
+    try:
+        return await client.fetch_recording_bytes(
+            audio_url,
+            recordingfile=call.recordingfile,
+            cdr_id=call.mikopbx_cdr_id,
+            read_timeout=read_timeout,
+            max_urls=max_urls,
+        )
+    except RuntimeError as exc:
+        if not _is_expired_token_error(str(exc)):
+            raise
+
+    call.audio_url = None
+    refreshed = await refresh_call_recording(db, client, call)
+    if not refreshed or refreshed == audio_url:
+        raise RuntimeError("MikoPBX playback token expired and could not be renewed")
+
+    return await client.fetch_recording_bytes(
+        refreshed,
+        recordingfile=call.recordingfile,
+        cdr_id=call.mikopbx_cdr_id,
+        read_timeout=read_timeout,
+        max_urls=max_urls,
+    )

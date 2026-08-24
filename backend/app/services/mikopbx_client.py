@@ -173,14 +173,44 @@ class MikoPBXClient:
     async def get_cdr_record(self, cdr_id: int) -> dict[str, Any]:
         return await self._request("GET", f"/cdr/{cdr_id}", timeout=httpx.Timeout(60.0))
 
+    @classmethod
+    def find_recording_url(cls, payload: Any, cdr_id: int | None = None) -> str | None:
+        """Search a CDR payload for a recording URL.
+
+        Legs can sit at the top level or nested under ``records``, and missing
+        the nested case means falling back to a stale token that MikoPBX
+        rejects with "Invalid or expired playback token".
+        """
+
+        def walk(node: Any, want_id: bool) -> str | None:
+            if isinstance(node, dict):
+                url = node.get("download_url") or node.get("playback_url")
+                if url:
+                    if not want_id:
+                        return url
+                    if cdr_id is not None and str(node.get("id")) == str(cdr_id):
+                        return url
+                for value in node.values():
+                    if isinstance(value, (dict, list)):
+                        found = walk(value, want_id)
+                        if found:
+                            return found
+            elif isinstance(node, list):
+                for item in node:
+                    found = walk(item, want_id)
+                    if found:
+                        return found
+            return None
+
+        if cdr_id is not None:
+            exact = walk(payload, True)
+            if exact:
+                return exact
+        return walk(payload, False)
+
     async def get_cdr_recording_url(self, cdr_id: int) -> str | None:
         payload = await self.get_cdr_record(cdr_id)
-        record = payload.get("data")
-        if isinstance(record, list):
-            record = record[0] if record and isinstance(record[0], dict) else None
-        if isinstance(record, dict):
-            return record.get("download_url") or record.get("playback_url")
-        return None
+        return self.find_recording_url(payload, cdr_id)
 
     async def get_cdr_page(
         self,

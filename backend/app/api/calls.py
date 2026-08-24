@@ -20,7 +20,7 @@ from app.schemas import (
     TranscriptionSegment,
 )
 from app.services.call_service import apply_call_rbac_filter, get_call_for_user
-from app.services.recording_service import resolve_call_audio_url
+from app.services.recording_service import fetch_call_recording, resolve_call_audio_url
 from app.services.sync_service import get_pbx_client
 from app.utils.timezone import localize_naive_to_utc
 from app.tasks.celery_app import celery_app
@@ -214,11 +214,10 @@ async def stream_call_audio(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="MikoPBX is not configured")
 
     try:
-        audio_url = await resolve_call_audio_url(db, client, call)
-        audio_bytes, content_type = await client.fetch_recording_bytes(
-            audio_url,
-            recordingfile=call.recordingfile,
-            cdr_id=call.mikopbx_cdr_id,
+        audio_bytes, content_type = await fetch_call_recording(
+            db,
+            client,
+            call,
             read_timeout=25.0,
             max_urls=2,
         )
