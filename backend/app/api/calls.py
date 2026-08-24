@@ -1,5 +1,5 @@
 import mimetypes
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
@@ -9,7 +9,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core.deps import get_current_user
 from app.database import get_db
-from app.models import CallRecord, Transcription, User
+from app.models import CallRecord, MikoPBXExtension, Transcription, User
 from app.models.enums import TranscriptionStatus
 from app.schemas import (
     CallRecordDetail,
@@ -26,8 +26,16 @@ from app.tasks.celery_app import celery_app
 router = APIRouter(prefix="/api/calls", tags=["calls"])
 
 
-def _call_to_response(call: CallRecord) -> CallRecordResponse:
+def _resolve_employee_name(call: CallRecord, ext_map: dict[str, str]) -> str | None:
+    for number in (call.src_num, call.dst_num):
+        if number and number in ext_map:
+            return ext_map[number]
+    return call.miko_user_name
+
+
+def _call_to_response(call: CallRecord, ext_map: dict[str, str] | None = None) -> CallRecordResponse:
     transcription_status = call.transcription.status if call.transcription else None
+    ext_map = ext_map or {}
     return CallRecordResponse(
         id=call.id,
         uniqueid=call.uniqueid,
@@ -41,6 +49,7 @@ def _call_to_response(call: CallRecord) -> CallRecordResponse:
         miko_user_name=call.miko_user_name,
         disposition=call.disposition,
         has_audio=bool(call.audio_url),
+        employee_name=_resolve_employee_name(call, ext_map),
         transcription_status=transcription_status,
     )
 
@@ -79,10 +88,16 @@ async def list_calls(
     stmt = select(CallRecord).options(selectinload(CallRecord.transcription))
     stmt = apply_call_rbac_filter(stmt, current_user)
 
-    if date_from:
-        stmt = stmt.where(CallRecord.call_date >= date_from)
-    if date_to:
-        stmt = stmt.where(CallRecord.call_date <= date_to)
+    if date_from is None and date_to is None:
+        date_to = datetime.now(timezone.utc)
+        date_from = date_to - timedelta(days=30)
+    elif date_from is None and date_to is not None:
+        date_from = date_to - timedelta(days=30)
+    elif date_to is None and date_from is not None:
+        date_to = datetime.now(timezone.utc)
+
+    stmt = stmt.where(CallRecord.call_date >= date_from)
+    stmt = stmt.where(CallRecord.call_date <= date_to)
     if src_num:
         stmt = stmt.where(CallRecord.src_num == src_num)
     if dst_num:
@@ -105,8 +120,11 @@ async def list_calls(
     result = await db.execute(stmt)
     calls = result.scalars().all()
 
+    ext_result = await db.execute(select(MikoPBXExtension))
+    ext_map = {row.extension: row.display_name for row in ext_result.scalars() if row.display_name}
+
     return PaginatedCallsResponse(
-        items=[_call_to_response(call) for call in calls],
+        items=[_call_to_response(call, ext_map) for call in calls],
         total=total,
         page=page,
         page_size=page_size,
@@ -123,7 +141,9 @@ async def get_call(
     if not call:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Call not found")
 
-    response = _call_to_response(call)
+    ext_result = await db.execute(select(MikoPBXExtension))
+    ext_map = {row.extension: row.display_name for row in ext_result.scalars() if row.display_name}
+    response = _call_to_response(call, ext_map)
     return CallRecordDetail(**response.model_dump(), transcription=_transcription_to_response(call.transcription))
 
 

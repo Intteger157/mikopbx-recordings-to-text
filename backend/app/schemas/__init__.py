@@ -118,6 +118,7 @@ class CallRecordResponse(BaseModel):
     miko_user_name: str | None
     disposition: str | None
     has_audio: bool = False
+    employee_name: str | None = None
     transcription_status: TranscriptionStatus | None = None
 
 

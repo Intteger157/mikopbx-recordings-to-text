@@ -53,6 +53,7 @@ export interface CallRecord {
   miko_user_name: string | null;
   disposition: string | null;
   has_audio: boolean;
+  employee_name: string | null;
   transcription_status: TranscriptionStatus | null;
 }
 

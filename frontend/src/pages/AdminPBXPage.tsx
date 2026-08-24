@@ -1,19 +1,20 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { format } from "date-fns";
 import { CheckCircle2, RefreshCw } from "lucide-react";
+import { useState } from "react";
 import api, { type PBXConfig } from "@/lib/api";
+import { dateToApiEnd, dateToApiStart, defaultFromDate, defaultToDate } from "@/lib/dates";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { useState } from "react";
 
 export function AdminPBXPage() {
   const queryClient = useQueryClient();
   const [apiUrl, setApiUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
-  const [dateFrom, setDateFrom] = useState("");
-  const [dateTo, setDateTo] = useState("");
+  const [dateFrom, setDateFrom] = useState(defaultFromDate);
+  const [dateTo, setDateTo] = useState(defaultToDate);
   const [message, setMessage] = useState<string | null>(null);
 
   const { data: config } = useQuery({
@@ -54,16 +55,19 @@ export function AdminPBXPage() {
     mutationFn: async () =>
       (
         await api.post("/admin/pbx-config/sync", {
-          date_from: new Date(dateFrom).toISOString(),
-          date_to: new Date(dateTo).toISOString(),
+          date_from: dateToApiStart(dateFrom),
+          date_to: dateToApiEnd(dateTo),
         })
       ).data,
     onSuccess: (data: { extensions_synced: number; calls_synced: number; calls_skipped: number }) => {
       setMessage(
-        `Synced ${data.extensions_synced} extensions and ${data.calls_synced} calls (${data.calls_skipped} skipped).`
+        `Synced ${data.extensions_synced} extensions and ${data.calls_synced} calls with recordings (${data.calls_skipped} skipped without recording).`
       );
       void queryClient.invalidateQueries({ queryKey: ["pbx-config"] });
       void queryClient.invalidateQueries({ queryKey: ["calls"] });
+    },
+    onError: (error: { response?: { data?: { detail?: string } } }) => {
+      setMessage(error.response?.data?.detail ?? "Sync failed");
     },
   });
 
@@ -120,23 +124,22 @@ export function AdminPBXPage() {
       <Card>
         <CardHeader>
           <CardTitle>Sync CDR</CardTitle>
-          <CardDescription>Fetch extensions and call recordings for the selected date range.</CardDescription>
+          <CardDescription>
+            Imports employees/extensions and call recordings for the selected period. Only calls with audio recordings
+            are saved.
+          </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-4 md:grid-cols-3">
           <div className="space-y-2">
             <Label htmlFor="syncFrom">From</Label>
-            <Input id="syncFrom" type="datetime-local" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} />
+            <Input id="syncFrom" type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} />
           </div>
           <div className="space-y-2">
             <Label htmlFor="syncTo">To</Label>
-            <Input id="syncTo" type="datetime-local" value={dateTo} onChange={(e) => setDateTo(e.target.value)} />
+            <Input id="syncTo" type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} />
           </div>
           <div className="flex items-end">
-            <Button
-              className="w-full"
-              onClick={() => syncMutation.mutate()}
-              disabled={syncMutation.isPending || !dateFrom || !dateTo}
-            >
+            <Button className="w-full" onClick={() => syncMutation.mutate()} disabled={syncMutation.isPending}>
               <RefreshCw className={`h-4 w-4 ${syncMutation.isPending ? "animate-spin" : ""}`} />
               Sync now
             </Button>

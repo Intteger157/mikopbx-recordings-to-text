@@ -74,6 +74,9 @@ async def sync_cdr(
     offset = 0
     limit = 100
 
+    ext_result = await db.execute(select(MikoPBXExtension))
+    ext_map = {row.extension: row.display_name for row in ext_result.scalars()}
+
     while True:
         page = await client.get_cdr_page(date_from=date_from, date_to=date_to, offset=offset, limit=limit)
         records = page.get("data", {}).get("records", [])
@@ -98,6 +101,13 @@ async def sync_cdr(
                 dst_num = leg.get("dst_num") or group_dst
                 src_name = group.get("src_name")
                 dst_name = group.get("dst_name")
+                src_str = str(src_num) if src_num is not None else None
+                dst_str = str(dst_num) if dst_num is not None else None
+                employee_name = None
+                for number in (src_str, dst_str):
+                    if number and number in ext_map:
+                        employee_name = ext_map[number]
+                        break
 
                 result = await db.execute(select(CallRecord).where(CallRecord.uniqueid == uniqueid))
                 existing = result.scalar_one_or_none()
@@ -105,13 +115,13 @@ async def sync_cdr(
                 payload = {
                     "linkedid": linkedid,
                     "call_date": call_date,
-                    "src_num": str(src_num) if src_num is not None else None,
-                    "dst_num": str(dst_num) if dst_num is not None else None,
+                    "src_num": src_str,
+                    "dst_num": dst_str,
                     "duration": int(leg.get("duration") or group.get("totalDuration") or 0),
                     "billsec": int(leg.get("billsec") or group.get("totalBillsec") or 0),
                     "audio_url": playback_url,
                     "recordingfile": recordingfile,
-                    "miko_user_name": src_name or dst_name,
+                    "miko_user_name": employee_name or src_name or dst_name,
                     "disposition": leg.get("disposition") or group.get("disposition"),
                 }
 
