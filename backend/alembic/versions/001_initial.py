@@ -16,39 +16,15 @@ down_revision: Union[str, None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
-user_role = postgresql.ENUM("SUPERADMIN", "MANAGER", "USER", name="user_role", create_type=False)
-transcription_status = postgresql.ENUM(
-    "PENDING", "PROCESSING", "COMPLETED", "FAILED", name="transcription_status", create_type=False
-)
-
 
 def upgrade() -> None:
-    op.execute(
-        """
-        DO $$ BEGIN
-            CREATE TYPE user_role AS ENUM ('SUPERADMIN', 'MANAGER', 'USER');
-        EXCEPTION
-            WHEN duplicate_object THEN NULL;
-        END $$;
-        """
-    )
-    op.execute(
-        """
-        DO $$ BEGIN
-            CREATE TYPE transcription_status AS ENUM ('PENDING', 'PROCESSING', 'COMPLETED', 'FAILED');
-        EXCEPTION
-            WHEN duplicate_object THEN NULL;
-        END $$;
-        """
-    )
-
     op.create_table(
         "users",
         sa.Column("id", sa.Integer(), nullable=False),
         sa.Column("username", sa.String(length=64), nullable=False),
         sa.Column("email", sa.String(length=255), nullable=False),
         sa.Column("hashed_password", sa.String(length=255), nullable=False),
-        sa.Column("role", user_role, nullable=False),
+        sa.Column("role", sa.String(length=32), nullable=False, server_default="USER"),
         sa.Column("is_active", sa.Boolean(), nullable=False, server_default=sa.text("true")),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
         sa.PrimaryKeyConstraint("id"),
@@ -115,7 +91,7 @@ def upgrade() -> None:
         "transcriptions",
         sa.Column("id", sa.Integer(), nullable=False),
         sa.Column("call_record_id", sa.Integer(), nullable=False),
-        sa.Column("status", transcription_status, nullable=False),
+        sa.Column("status", sa.String(length=32), nullable=False, server_default="PENDING"),
         sa.Column("language", sa.String(length=16), nullable=True),
         sa.Column("text", sa.Text(), nullable=True),
         sa.Column("segments_json", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
@@ -146,5 +122,3 @@ def downgrade() -> None:
     op.drop_index(op.f("ix_users_username"), table_name="users")
     op.drop_index(op.f("ix_users_email"), table_name="users")
     op.drop_table("users")
-    op.execute("DROP TYPE IF EXISTS transcription_status")
-    op.execute("DROP TYPE IF EXISTS user_role")

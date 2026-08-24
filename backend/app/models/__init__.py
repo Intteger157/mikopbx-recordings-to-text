@@ -15,7 +15,9 @@ class User(Base):
     username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     hashed_password: Mapped[str] = mapped_column(String(255))
-    role: Mapped[UserRole] = mapped_column(Enum(UserRole, name="user_role"), default=UserRole.USER)
+    role: Mapped[UserRole] = mapped_column(
+        Enum(UserRole, native_enum=False, length=32), default=UserRole.USER
+    )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -84,7 +86,7 @@ class Transcription(Base):
         ForeignKey("call_records.id", ondelete="CASCADE"), unique=True, index=True
     )
     status: Mapped[TranscriptionStatus] = mapped_column(
-        Enum(TranscriptionStatus, name="transcription_status"), default=TranscriptionStatus.PENDING
+        Enum(TranscriptionStatus, native_enum=False, length=32), default=TranscriptionStatus.PENDING
     )
     language: Mapped[str | None] = mapped_column(String(16), nullable=True)
     text: Mapped[str | None] = mapped_column(Text, nullable=True)

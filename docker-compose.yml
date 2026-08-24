@@ -27,6 +27,7 @@ services:
 
   api:
     build: ./backend
+    restart: unless-stopped
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-whisper}:${POSTGRES_PASSWORD:-whisper}@postgres:5432/${POSTGRES_DB:-whisper}
       DATABASE_URL_SYNC: postgresql+psycopg2://${POSTGRES_USER:-whisper}:${POSTGRES_PASSWORD:-whisper}@postgres:5432/${POSTGRES_DB:-whisper}
@@ -56,6 +57,7 @@ services:
 
   celery-worker:
     build: ./backend
+    restart: unless-stopped
     command: celery -A app.tasks.celery_app worker --loglevel=info --concurrency=1
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-whisper}:${POSTGRES_PASSWORD:-whisper}@postgres:5432/${POSTGRES_DB:-whisper}
@@ -78,6 +80,7 @@ services:
 
   frontend:
     build: ./frontend
+    restart: unless-stopped
     environment:
       VITE_API_URL: http://api:8000
     ports:
