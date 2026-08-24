@@ -18,27 +18,22 @@ def _leg_recording_url(leg: dict) -> str | None:
 
 
 async def _lookup_cdr_leg(client: MikoPBXClient, call: CallRecord) -> dict | None:
+    """Find the CDR leg for this call to get a fresh recording token.
+
+    Kept to a single narrow page so audio requests never block for minutes.
+    """
     tz = get_pbx_timezone()
     center = call.call_date.astimezone(tz)
-    window_start = center - timedelta(hours=2)
-    window_end = center + timedelta(hours=2)
-
-    offset = 0
-    limit = 100
-    for _ in range(5):
-        page = await client.get_cdr_page(
-            date_from=window_start,
-            date_to=window_end,
-            offset=offset,
-            limit=limit,
-        )
-        legs, has_more, _ = client.parse_cdr_page(page, limit=limit)
-        for leg in legs:
-            if _leg_uniqueid(leg) == call.uniqueid:
-                return leg
-        if not has_more:
-            break
-        offset += limit
+    page = await client.get_cdr_page(
+        date_from=center - timedelta(minutes=15),
+        date_to=center + timedelta(minutes=15),
+        offset=0,
+        limit=100,
+    )
+    legs, _, _ = client.parse_cdr_page(page, limit=100)
+    for leg in legs:
+        if _leg_uniqueid(leg) == call.uniqueid:
+            return leg
     return None
 
 
@@ -48,13 +43,19 @@ async def refresh_call_recording(
     call: CallRecord,
 ) -> str | None:
     if call.mikopbx_cdr_id:
-        fresh_url = await client.get_cdr_recording_url(call.mikopbx_cdr_id)
+        try:
+            fresh_url = await client.get_cdr_recording_url(call.mikopbx_cdr_id)
+        except RuntimeError:
+            fresh_url = None
         if fresh_url:
             call.audio_url = fresh_url
             await db.commit()
             return fresh_url
 
-    leg = await _lookup_cdr_leg(client, call)
+    try:
+        leg = await _lookup_cdr_leg(client, call)
+    except RuntimeError:
+        leg = None
     if leg:
         cdr_id = leg.get("id")
         fresh_url = _leg_recording_url(leg)

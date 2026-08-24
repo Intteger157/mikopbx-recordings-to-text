@@ -226,6 +226,46 @@ async def stream_call_audio(
     return Response(content=audio_bytes, media_type=media_type)
 
 
+@router.get("/{call_id}/audio-debug")
+async def debug_call_audio(
+    call_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    call = await get_call_for_user(db, call_id, current_user)
+    if not call:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Call not found")
+
+    client = await get_pbx_client(db)
+    if not client:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="MikoPBX is not configured")
+
+    stored_url = call.audio_url
+    refresh_error: str | None = None
+    try:
+        audio_url = await resolve_call_audio_url(db, client, call)
+    except RuntimeError as exc:
+        refresh_error = str(exc)
+        audio_url = stored_url
+
+    attempts = await client.probe_recording_urls(
+        audio_url or "",
+        recordingfile=call.recordingfile,
+        cdr_id=call.mikopbx_cdr_id,
+    ) if audio_url else []
+
+    return {
+        "call_id": call.id,
+        "uniqueid": call.uniqueid,
+        "mikopbx_cdr_id": call.mikopbx_cdr_id,
+        "recordingfile": call.recordingfile,
+        "stored_audio_url": stored_url,
+        "resolved_audio_url": audio_url,
+        "refresh_error": refresh_error,
+        "attempts": attempts,
+    }
+
+
 @router.post("/{call_id}/transcribe", response_model=TranscriptionEnqueueResponse)
 async def enqueue_transcription(
     call_id: int,

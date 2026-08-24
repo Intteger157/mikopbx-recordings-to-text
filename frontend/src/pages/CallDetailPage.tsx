@@ -50,6 +50,10 @@ export function CallDetailPage() {
     },
   });
 
+  const diagnoseMutation = useMutation({
+    mutationFn: async () => (await api.get(`/calls/${callId}/audio-debug`, { timeout: 120_000 })).data,
+  });
+
   const transcribeMutation = useMutation({
     mutationFn: async () => (await api.post(`/calls/${callId}/transcribe`)).data,
     onSuccess: () => {
@@ -167,6 +171,29 @@ export function CallDetailPage() {
           <CardContent className="space-y-4">
             {audioLoading && <p className="text-sm text-muted-foreground">Loading audio...</p>}
             {audioError && <p className="text-sm text-destructive">{audioError}</p>}
+
+            {(audioError || (!audioLoading && !audioSrc)) && (
+              <div className="space-y-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => diagnoseMutation.mutate()}
+                  disabled={diagnoseMutation.isPending}
+                >
+                  {diagnoseMutation.isPending ? "Checking MikoPBX..." : "Diagnose recording download"}
+                </Button>
+                {diagnoseMutation.data && (
+                  <pre className="max-h-72 overflow-auto rounded-lg border bg-muted/30 p-3 text-xs">
+                    {JSON.stringify(diagnoseMutation.data, null, 2)}
+                  </pre>
+                )}
+                {diagnoseMutation.isError && (
+                  <p className="text-sm text-destructive">
+                    {getApiError(diagnoseMutation.error, "Diagnostics failed")}
+                  </p>
+                )}
+              </div>
+            )}
             {audioSrc ? (
               <audio ref={audioRef} controls className="w-full" src={audioSrc} preload="metadata" />
             ) : !audioLoading ? (

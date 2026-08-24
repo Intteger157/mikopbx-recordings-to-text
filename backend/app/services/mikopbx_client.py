@@ -164,6 +164,8 @@ class MikoPBXClient:
     async def get_cdr_recording_url(self, cdr_id: int) -> str | None:
         payload = await self.get_cdr_record(cdr_id)
         record = payload.get("data")
+        if isinstance(record, list):
+            record = record[0] if record and isinstance(record[0], dict) else None
         if isinstance(record, dict):
             return record.get("download_url") or record.get("playback_url")
         return None
@@ -274,7 +276,7 @@ class MikoPBXClient:
         cdr_id: int | None = None,
     ) -> tuple[bytes, str | None]:
         urls = self.build_recording_download_urls(audio_path, recordingfile, cdr_id)
-        timeout = httpx.Timeout(connect=15.0, read=90.0, write=30.0, pool=15.0)
+        timeout = httpx.Timeout(connect=10.0, read=45.0, write=20.0, pool=10.0)
         errors: list[str] = []
 
         async with httpx.AsyncClient(timeout=timeout, verify=False, follow_redirects=True) as client:
@@ -297,6 +299,35 @@ class MikoPBXClient:
 
         detail = "; ".join(errors[-5:]) if errors else "no URLs tried"
         raise RuntimeError(f"Cannot download recording from MikoPBX: {detail}")
+
+    async def probe_recording_urls(
+        self,
+        audio_path: str,
+        recordingfile: str | None = None,
+        cdr_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Try every candidate recording URL and report what MikoPBX answered."""
+        urls = self.build_recording_download_urls(audio_path, recordingfile, cdr_id)
+        timeout = httpx.Timeout(connect=8.0, read=20.0, write=10.0, pool=8.0)
+        results: list[dict[str, Any]] = []
+
+        async with httpx.AsyncClient(timeout=timeout, verify=False, follow_redirects=True) as client:
+            for url in urls:
+                for auth_mode, headers in (("token only", {}), ("bearer", self._recording_headers())):
+                    entry: dict[str, Any] = {"url": url, "auth": auth_mode}
+                    try:
+                        response = await client.get(url, headers=headers)
+                        data = response.content
+                        entry["status"] = response.status_code
+                        entry["content_type"] = response.headers.get("content-type")
+                        entry["bytes"] = len(data)
+                        entry["is_audio"] = self._looks_like_audio(entry["content_type"], data)
+                        if not entry["is_audio"]:
+                            entry["body"] = data[:300].decode("utf-8", errors="replace")
+                    except httpx.HTTPError as exc:
+                        entry["error"] = str(exc)
+                    results.append(entry)
+        return results
 
     async def stream_audio(self, audio_path: str):
         url = self.resolve_audio_url(audio_path)
