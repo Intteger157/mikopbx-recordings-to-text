@@ -1,0 +1,80 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: whisper
+      POSTGRES_PASSWORD: whisper
+      POSTGRES_DB: whisper
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U whisper -d whisper"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql+asyncpg://whisper:whisper@postgres:5432/whisper
+      DATABASE_URL_SYNC: postgresql+psycopg2://whisper:whisper@postgres:5432/whisper
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: change-me-in-production
+      CORS_ORIGINS: http://localhost:5173,http://localhost:3000
+      SUPERADMIN_USERNAME: admin
+      SUPERADMIN_EMAIL: admin@localhost
+      SUPERADMIN_PASSWORD: admin123
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  celery-worker:
+    build: ./backend
+    command: sh -c "alembic upgrade head && celery -A app.tasks.celery_app worker --loglevel=info --concurrency=1"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://whisper:whisper@postgres:5432/whisper
+      DATABASE_URL_SYNC: postgresql+psycopg2://whisper:whisper@postgres:5432/whisper
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: change-me-in-production
+      WHISPER_MODEL: medium
+      WHISPER_DEVICE: cpu
+      WHISPER_COMPUTE_TYPE: int8
+      WHISPER_CPU_THREADS: 4
+    volumes:
+      - whisper_models:/root/.cache/huggingface
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_started
+
+  frontend:
+    build: ./frontend
+    environment:
+      VITE_API_URL: http://api:8000
+    ports:
+      - "5173:5173"
+    depends_on:
+      - api
+
+volumes:
+  postgres_data:
+  whisper_models:
