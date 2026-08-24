@@ -13,6 +13,11 @@ logger = logging.getLogger(__name__)
 
 class MikoPBXClient:
     MIN_RECORDING_BYTES = 2048
+    RESUME_CHUNK_BYTES = 16 * 1024
+    MAX_RESUME_CHUNK_BYTES = 1024 * 1024
+    RESUME_READ_TIMEOUT = 20.0
+    MAX_RESUME_STALLS = 3
+    MAX_RESUME_REQUESTS = 800
     _TOKEN_IN_URL = re.compile(r"token=([a-f0-9]{32,64})", re.IGNORECASE)
 
     def __init__(self, api_url: str, api_key: str):
@@ -316,13 +321,17 @@ class MikoPBXClient:
         client: httpx.AsyncClient,
         url: str,
         headers: dict[str, str],
+        timeout: httpx.Timeout | float | None = None,
     ) -> tuple[bytes, dict[str, str], int]:
         """Stream a recording, returning the body plus the response headers.
 
-        Headers come back even on failure so callers can report exactly what
-        MikoPBX answered instead of a bare timeout.
+        Headers and any bytes received so far come back even when the transfer
+        stalls, so callers can resume with a Range request instead of losing
+        everything to a timeout.
         """
-        async with client.stream("GET", url, headers=headers) as response:
+        chunks: list[bytes] = []
+        stream_kwargs = {} if timeout is None else {"timeout": timeout}
+        async with client.stream("GET", url, headers=headers, **stream_kwargs) as response:
             status = response.status_code
             meta = {
                 key: value
@@ -336,17 +345,76 @@ class MikoPBXClient:
             content_length = response.headers.get("content-length")
             target = int(content_length) if content_length and content_length.isdigit() else None
 
-            chunks: list[bytes] = []
             total = 0
-            async for chunk in response.aiter_bytes(chunk_size=64 * 1024):
-                chunks.append(chunk)
-                total += len(chunk)
-                if target is not None and total >= target:
-                    break
-                if total > 100 * 1024 * 1024:
-                    break
+            try:
+                async for chunk in response.aiter_bytes(chunk_size=32 * 1024):
+                    chunks.append(chunk)
+                    total += len(chunk)
+                    if target is not None and total >= target:
+                        break
+                    if total > 100 * 1024 * 1024:
+                        break
+            except httpx.TimeoutException:
+                if not chunks:
+                    raise
 
-            return b"".join(chunks), meta, status
+        return b"".join(chunks), meta, status
+
+    async def _resume_recording(
+        self,
+        client: httpx.AsyncClient,
+        url: str,
+        headers: dict[str, str],
+        data: bytes,
+        total_size: int,
+    ) -> bytes:
+        """Finish a stalled download with small Range requests.
+
+        MikoPBX advertises ``Accept-Ranges: bytes`` but stalls after roughly
+        20 KB on a single connection, so ask for chunks small enough to arrive
+        before the stall and stop once several requests make no progress.
+        """
+        timeout = httpx.Timeout(connect=10.0, read=self.RESUME_READ_TIMEOUT, write=20.0, pool=10.0)
+        chunk_size = self.RESUME_CHUNK_BYTES
+        stalled = 0
+        requests = 0
+
+        while len(data) < total_size and stalled < self.MAX_RESUME_STALLS:
+            if requests >= self.MAX_RESUME_REQUESTS:
+                logger.warning("Giving up resuming %s after %d range requests", url, requests)
+                break
+
+            start = len(data)
+            end = min(start + chunk_size, total_size) - 1
+            requested = end - start + 1
+            range_headers = {**headers, "Range": f"bytes={start}-{end}"}
+            requests += 1
+
+            try:
+                chunk, _, status = await self._read_recording_body(client, url, range_headers, timeout=timeout)
+            except httpx.HTTPError:
+                stalled += 1
+                continue
+
+            if status not in {200, 206} or not chunk:
+                stalled += 1
+                continue
+
+            if status == 200 and len(chunk) >= total_size:
+                # The server ignored Range and sent the whole file.
+                return chunk
+
+            data += chunk
+            stalled = 0
+            # Grow while the PBX keeps up, back off when a chunk arrives short.
+            if len(chunk) >= requested:
+                chunk_size = min(chunk_size * 2, self.MAX_RESUME_CHUNK_BYTES)
+            else:
+                chunk_size = max(self.RESUME_CHUNK_BYTES, chunk_size // 2)
+
+        if len(data) >= total_size:
+            logger.info("Resumed recording download to %d bytes in %d range requests", len(data), requests)
+        return data
 
     async def fetch_recording_bytes(
         self,
@@ -386,8 +454,17 @@ class MikoPBXClient:
                     snippet = data[:200].decode("utf-8", errors="replace")
                     errors.append(f"{url} -> {described}: {snippet}")
                     continue
+
+                declared = meta.get("content-length")
+                total_size = int(declared) if declared and declared.isdigit() else None
+                if total_size and len(data) < total_size:
+                    data = await self._resume_recording(client, url, headers, data, total_size)
+
                 if len(data) < self.MIN_RECORDING_BYTES:
                     errors.append(f"{url} -> only {len(data)} bytes ({described})")
+                    continue
+                if total_size and len(data) < total_size:
+                    errors.append(f"{url} -> incomplete {len(data)}/{total_size} bytes ({described})")
                     continue
 
                 logger.info("Recording downloaded from %s (%s, %d bytes)", url, content_type, len(data))
