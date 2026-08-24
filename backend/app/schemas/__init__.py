@@ -69,9 +69,21 @@ class PBXSyncRequest(BaseModel):
 
 
 class PBXSyncResponse(BaseModel):
-    extensions_synced: int
-    calls_synced: int
-    calls_skipped: int
+    state: str = "started"
+    message: str
+
+
+class PBXSyncStatusResponse(BaseModel):
+    state: str
+    phase: str | None = None
+    extensions_synced: int = 0
+    calls_synced: int = 0
+    calls_skipped: int = 0
+    cdr_page: int = 0
+    message: str
+    error: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
 
 
 class ExtensionResponse(BaseModel):

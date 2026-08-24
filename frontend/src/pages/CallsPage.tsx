@@ -46,6 +46,7 @@ export function CallsPage() {
       });
       return response.data;
     },
+    refetchInterval: 5000,
   });
 
   const totalPages = data ? Math.max(1, Math.ceil(data.total / data.page_size)) : 1;

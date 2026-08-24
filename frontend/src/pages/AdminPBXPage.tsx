@@ -1,8 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { format } from "date-fns";
-import { CheckCircle2, RefreshCw } from "lucide-react";
-import { useState } from "react";
-import api, { type PBXConfig } from "@/lib/api";
+import { CheckCircle2, LoaderCircle, RefreshCw } from "lucide-react";
+import { useEffect, useState } from "react";
+import api, { type PBXConfig, type PBXSyncStatus } from "@/lib/api";
 import { dateToApiEnd, dateToApiStart, defaultFromDate, defaultToDate } from "@/lib/dates";
 import { getApiError } from "@/lib/errors";
 import { Button } from "@/components/ui/button";
@@ -27,6 +27,33 @@ export function AdminPBXPage() {
       return response.data;
     },
   });
+
+  const { data: syncStatus } = useQuery({
+    queryKey: ["sync-status"],
+    queryFn: async () => (await api.get<PBXSyncStatus>("/admin/pbx-config/sync-status")).data,
+    refetchInterval: (query) => (query.state.data?.state === "running" ? 1500 : false),
+  });
+
+  const isSyncing = syncStatus?.state === "running";
+
+  useEffect(() => {
+    if (!syncStatus) return;
+
+    if (syncStatus.state === "completed") {
+      setIsError(false);
+      setMessage(
+        `Synced ${syncStatus.extensions_synced} extensions and ${syncStatus.calls_synced} calls with recordings (${syncStatus.calls_skipped} skipped).`
+      );
+      void queryClient.invalidateQueries({ queryKey: ["pbx-config"] });
+      void queryClient.invalidateQueries({ queryKey: ["calls"] });
+      void queryClient.invalidateQueries({ queryKey: ["extensions"] });
+    }
+
+    if (syncStatus.state === "failed") {
+      setIsError(true);
+      setMessage(syncStatus.error ?? "Sync failed");
+    }
+  }, [syncStatus?.state, syncStatus?.finished_at]);
 
   const saveMutation = useMutation({
     mutationFn: async () =>
@@ -64,13 +91,10 @@ export function AdminPBXPage() {
           date_to: dateToApiEnd(dateTo),
         })
       ).data,
-    onSuccess: (data: { extensions_synced: number; calls_synced: number; calls_skipped: number }) => {
+    onSuccess: () => {
       setIsError(false);
-      setMessage(
-        `Synced ${data.extensions_synced} extensions and ${data.calls_synced} calls with recordings (${data.calls_skipped} skipped without recording).`
-      );
-      void queryClient.invalidateQueries({ queryKey: ["pbx-config"] });
-      void queryClient.invalidateQueries({ queryKey: ["calls"] });
+      setMessage("Sync started — importing recordings in background...");
+      void queryClient.invalidateQueries({ queryKey: ["sync-status"] });
     },
     onError: (error: unknown) => {
       setIsError(true);
@@ -132,25 +156,49 @@ export function AdminPBXPage() {
         <CardHeader>
           <CardTitle>Sync CDR</CardTitle>
           <CardDescription>
-            Imports employees/extensions and call recordings for the selected period. Only calls with audio recordings
-            are saved.
+            Runs in background. Recordings appear in Call Records as each page is imported. Only calls with audio
+            recordings are saved.
           </CardDescription>
         </CardHeader>
-        <CardContent className="grid gap-4 md:grid-cols-3">
-          <div className="space-y-2">
-            <Label htmlFor="syncFrom">From</Label>
-            <Input id="syncFrom" type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} />
+        <CardContent className="space-y-4">
+          <div className="grid gap-4 md:grid-cols-3">
+            <div className="space-y-2">
+              <Label htmlFor="syncFrom">From</Label>
+              <Input id="syncFrom" type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="syncTo">To</Label>
+              <Input id="syncTo" type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} />
+            </div>
+            <div className="flex items-end">
+              <Button
+                className="w-full"
+                onClick={() => syncMutation.mutate()}
+                disabled={syncMutation.isPending || isSyncing}
+              >
+                {isSyncing ? (
+                  <LoaderCircle className="h-4 w-4 animate-spin" />
+                ) : (
+                  <RefreshCw className="h-4 w-4" />
+                )}
+                {isSyncing ? "Syncing..." : "Sync now"}
+              </Button>
+            </div>
           </div>
-          <div className="space-y-2">
-            <Label htmlFor="syncTo">To</Label>
-            <Input id="syncTo" type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} />
-          </div>
-          <div className="flex items-end">
-            <Button className="w-full" onClick={() => syncMutation.mutate()} disabled={syncMutation.isPending}>
-              <RefreshCw className={`h-4 w-4 ${syncMutation.isPending ? "animate-spin" : ""}`} />
-              Sync now
-            </Button>
-          </div>
+
+          {isSyncing && syncStatus && (
+            <div className="rounded-lg border bg-muted/30 p-4 text-sm">
+              <p className="font-medium">{syncStatus.message}</p>
+              <p className="mt-2 text-muted-foreground">
+                Extensions: {syncStatus.extensions_synced} · Calls imported: {syncStatus.calls_synced} · Skipped:{" "}
+                {syncStatus.calls_skipped}
+                {syncStatus.cdr_page > 0 ? ` · CDR page ${syncStatus.cdr_page}` : ""}
+              </p>
+              <p className="mt-2 text-muted-foreground">
+                You can open Call Records — new entries appear as sync progresses.
+              </p>
+            </div>
+          )}
         </CardContent>
       </Card>
 

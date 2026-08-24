@@ -95,6 +95,19 @@ export interface PBXConfig {
   last_sync_at: string | null;
 }
 
+export interface PBXSyncStatus {
+  state: "idle" | "running" | "completed" | "failed";
+  phase: string | null;
+  extensions_synced: number;
+  calls_synced: number;
+  calls_skipped: number;
+  cdr_page: number;
+  message: string;
+  error: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
 export interface Extension {
   id: number;
   extension: string;

@@ -14,9 +14,10 @@ from app.schemas import (
     PBXConfigUpdate,
     PBXSyncRequest,
     PBXSyncResponse,
+    PBXSyncStatusResponse,
 )
-from app.services.sync_service import get_pbx_client, sync_cdr, sync_extensions
-from app.tasks.celery_app import celery_app
+from app.services.sync_status import get_sync_status, is_sync_running, start_sync
+from app.tasks.sync import sync_pbx_task
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -62,6 +63,8 @@ async def test_pbx_config(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_roles(UserRole.SUPERADMIN)),
 ):
+    from app.services.sync_service import get_pbx_client
+
     client = await get_pbx_client(db)
     if not client:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="MikoPBX is not configured")
@@ -82,39 +85,30 @@ async def test_pbx_config(
     return {"success": True, "message": "Connection successful"}
 
 
+@router.get("/pbx-config/sync-status", response_model=PBXSyncStatusResponse)
+async def get_pbx_sync_status(_: User = Depends(require_roles(UserRole.SUPERADMIN))):
+    status_data = get_sync_status()
+    return PBXSyncStatusResponse(**status_data)
+
+
 @router.post("/pbx-config/sync", response_model=PBXSyncResponse)
 async def trigger_pbx_sync(
     payload: PBXSyncRequest,
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_roles(UserRole.SUPERADMIN)),
 ):
+    from app.services.sync_service import get_pbx_client
+
     client = await get_pbx_client(db)
     if not client:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="MikoPBX is not configured")
 
-    try:
-        extensions_synced = await sync_extensions(db, client)
-        calls_synced, calls_skipped = await sync_cdr(db, client, payload.date_from, payload.date_to)
-    except Exception as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    if is_sync_running():
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Sync already in progress")
 
-    return PBXSyncResponse(
-        extensions_synced=extensions_synced,
-        calls_synced=calls_synced,
-        calls_skipped=calls_skipped,
-    )
-
-
-@router.post("/pbx-config/sync-async")
-async def trigger_pbx_sync_async(
-    payload: PBXSyncRequest,
-    _: User = Depends(require_roles(UserRole.SUPERADMIN)),
-):
-    celery_app.send_task(
-        "sync_pbx",
-        args=[payload.date_from.isoformat(), payload.date_to.isoformat()],
-    )
-    return {"success": True, "message": "Sync job queued"}
+    start_sync()
+    sync_pbx_task.delay(payload.date_from.isoformat(), payload.date_to.isoformat())
+    return PBXSyncResponse(state="started", message="Sync started in background")
 
 
 @router.get("/extensions", response_model=list[ExtensionResponse])
