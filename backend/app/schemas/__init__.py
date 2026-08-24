@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.enums import TranscriptionStatus, UserRole
 
@@ -12,7 +12,7 @@ class TokenResponse(BaseModel):
 
 class UserBase(BaseModel):
     username: str
-    email: EmailStr
+    email: str
     role: UserRole = UserRole.USER
     is_active: bool = True
     allowed_extensions: list[str] = Field(default_factory=list)
@@ -23,7 +23,7 @@ class UserCreate(UserBase):
 
 
 class UserUpdate(BaseModel):
-    email: EmailStr | None = None
+    email: str | None = None
     role: UserRole | None = None
     is_active: bool | None = None
     password: str | None = Field(default=None, min_length=6)
@@ -35,7 +35,7 @@ class UserResponse(BaseModel):
 
     id: int
     username: str
-    email: EmailStr
+    email: str
     role: UserRole
     is_active: bool
     created_at: datetime

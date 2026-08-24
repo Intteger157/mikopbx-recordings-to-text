@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     WHISPER_CPU_THREADS: int = 4
 
     SUPERADMIN_USERNAME: str = "admin"
-    SUPERADMIN_EMAIL: str = "admin@localhost"
+    SUPERADMIN_EMAIL: str = "admin@example.com"
     SUPERADMIN_PASSWORD: str = "admin123"
 
     CORS_ORIGINS: str = "http://localhost:5173,http://localhost:3000"

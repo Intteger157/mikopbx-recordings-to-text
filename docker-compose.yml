@@ -35,7 +35,7 @@ services:
       JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
       SUPERADMIN_USERNAME: ${SUPERADMIN_USERNAME:-admin}
-      SUPERADMIN_EMAIL: ${SUPERADMIN_EMAIL:-admin@localhost}
+      SUPERADMIN_EMAIL: ${SUPERADMIN_EMAIL:-admin@example.com}
       SUPERADMIN_PASSWORD: ${SUPERADMIN_PASSWORD:-admin123}
     ports:
       - "8000:8000"

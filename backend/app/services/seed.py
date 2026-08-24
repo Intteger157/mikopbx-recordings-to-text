@@ -12,15 +12,22 @@ from app.config import get_settings
 async def seed_superadmin(db: AsyncSession) -> None:
     settings = get_settings()
     result = await db.execute(select(User).where(User.username == settings.SUPERADMIN_USERNAME))
-    if result.scalar_one_or_none() is None:
-        admin = User(
-            username=settings.SUPERADMIN_USERNAME,
-            email=settings.SUPERADMIN_EMAIL,
-            hashed_password=get_password_hash(settings.SUPERADMIN_PASSWORD),
-            role=UserRole.SUPERADMIN,
-            is_active=True,
+    admin = result.scalar_one_or_none()
+
+    if admin is None:
+        db.add(
+            User(
+                username=settings.SUPERADMIN_USERNAME,
+                email=settings.SUPERADMIN_EMAIL,
+                hashed_password=get_password_hash(settings.SUPERADMIN_PASSWORD),
+                role=UserRole.SUPERADMIN,
+                is_active=True,
+            )
         )
-        db.add(admin)
+    else:
+        admin.email = settings.SUPERADMIN_EMAIL
+        admin.role = UserRole.SUPERADMIN
+        admin.is_active = True
 
     config_result = await db.execute(select(MikoPBXConfig).where(MikoPBXConfig.id == 1))
     if config_result.scalar_one_or_none() is None:
