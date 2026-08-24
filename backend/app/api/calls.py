@@ -28,7 +28,8 @@ from app.tasks.celery_app import celery_app
 router = APIRouter(prefix="/api/calls", tags=["calls"])
 
 STALE_TRANSCRIPTION_MINUTES = 15
-STALE_PROCESSING_MINUTES = 5
+# First run downloads the Whisper model, so allow a generous window
+STALE_PROCESSING_MINUTES = 40
 
 
 def _mark_stale_transcription(transcription: Transcription | None) -> Transcription | None:
