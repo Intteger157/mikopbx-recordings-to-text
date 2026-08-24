@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime
 
 from app.database import async_session
 from app.services.sync_service import get_pbx_client, sync_cdr, sync_extensions
 from app.services.sync_status import complete_sync, fail_sync, update_sync_status
 from app.tasks.celery_app import celery_app
+from app.tasks.celery_async import run_async_task
 
 
 def _progress_callback(fields: dict) -> None:
@@ -41,4 +41,4 @@ async def _run_sync(date_from: str, date_to: str) -> dict:
 
 @celery_app.task(name="sync_pbx", bind=True, max_retries=0, soft_time_limit=3600, time_limit=3660)
 def sync_pbx_task(self, date_from: str, date_to: str) -> dict:
-    return asyncio.run(_run_sync(date_from, date_to))
+    return run_async_task(lambda: _run_sync(date_from, date_to))

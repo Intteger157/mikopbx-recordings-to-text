@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,12 +10,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from app.config import get_settings
-from app.database import async_session
+from app.database import async_session, sync_session
 from app.models import Transcription
 from app.models.enums import TranscriptionStatus
 from app.services.recording_service import resolve_call_audio_url
 from app.services.sync_service import get_pbx_client
 from app.tasks.celery_app import celery_app
+from app.tasks.celery_async import run_async_task
 
 settings = get_settings()
 _model: WhisperModel | None = None
@@ -99,21 +99,18 @@ async def _run_transcription(transcription_id: int) -> None:
 
 @celery_app.task(name="transcribe_call", bind=True, max_retries=0, soft_time_limit=3600, time_limit=3660)
 def transcribe_call(self, transcription_id: int) -> None:
-    asyncio.run(_run_transcription(transcription_id))
+    run_async_task(lambda: _run_transcription(transcription_id))
 
 
-async def _release_orphaned_transcriptions() -> None:
-    async with async_session() as db:
-        result = await db.execute(
-            select(Transcription).where(Transcription.status == TranscriptionStatus.PROCESSING)
-        )
+def _release_orphaned_transcriptions_sync() -> None:
+    with sync_session() as db:
+        result = db.execute(select(Transcription).where(Transcription.status == TranscriptionStatus.PROCESSING))
         for transcription in result.scalars():
             transcription.status = TranscriptionStatus.FAILED
             transcription.error_message = "Worker restarted while transcribing. Press Transcribe to retry."
-        await db.commit()
+        db.commit()
 
 
 @worker_ready.connect
 def release_orphaned_transcriptions(**_kwargs) -> None:
-    """A killed worker leaves rows stuck in PROCESSING with nothing running."""
-    asyncio.run(_release_orphaned_transcriptions())
+    _release_orphaned_transcriptions_sync()
