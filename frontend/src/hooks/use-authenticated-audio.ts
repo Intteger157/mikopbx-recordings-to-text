@@ -19,7 +19,7 @@ export function useAuthenticatedAudio(url: string | undefined) {
       setLoading(true);
       setError(null);
       try {
-        const response = await api.get(url, { responseType: "blob" });
+        const response = await api.get(url, { responseType: "blob", timeout: 180_000 });
         if (!active) return;
         createdUrl = URL.createObjectURL(response.data);
         setObjectUrl(createdUrl);

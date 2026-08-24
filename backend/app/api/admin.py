@@ -18,6 +18,7 @@ from app.schemas import (
 )
 from app.services.sync_status import get_sync_status, is_sync_running, reset_sync, start_sync
 from app.tasks.sync import sync_pbx_task
+from app.tasks.celery_app import celery_app
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -96,6 +97,16 @@ async def get_pbx_sync_status(_: User = Depends(require_roles(UserRole.SUPERADMI
 async def cancel_pbx_sync(_: User = Depends(require_roles(UserRole.SUPERADMIN))):
     reset_sync("Sync cancelled by user")
     return {"state": "cancelled", "message": "Sync cancelled"}
+
+
+@router.get("/worker-status")
+async def get_worker_status(_: User = Depends(require_roles(UserRole.SUPERADMIN))):
+    try:
+        ping = celery_app.control.inspect(timeout=3.0).ping() or {}
+    except Exception:
+        ping = {}
+    workers = list(ping.keys())
+    return {"online": bool(workers), "workers": workers}
 
 
 @router.post("/pbx-config/sync", response_model=PBXSyncResponse)

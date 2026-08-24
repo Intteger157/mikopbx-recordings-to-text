@@ -57,6 +57,9 @@ def _leg_to_payload(leg: dict[str, Any], ext_map: dict[str, str]) -> dict[str, A
             employee_name = ext_map[number]
             break
 
+    cdr_id = leg.get("id")
+    mikopbx_cdr_id = int(cdr_id) if cdr_id is not None else None
+
     return {
         "uniqueid": uniqueid,
         "linkedid": leg.get("linkedid") or leg.get("_group_linkedid"),
@@ -67,6 +70,7 @@ def _leg_to_payload(leg: dict[str, Any], ext_map: dict[str, str]) -> dict[str, A
         "billsec": int(leg.get("billsec") or leg.get("_group_billsec") or 0),
         "audio_url": audio_url,
         "recordingfile": recordingfile,
+        "mikopbx_cdr_id": mikopbx_cdr_id,
         "miko_user_name": employee_name or src_name or dst_name,
         "disposition": leg.get("disposition") or leg.get("_group_disposition"),
     }
@@ -144,6 +148,7 @@ async def _upsert_call_batch(db: AsyncSession, batch: list[dict[str, Any]]) -> N
         "billsec": stmt.excluded.billsec,
         "audio_url": stmt.excluded.audio_url,
         "recordingfile": stmt.excluded.recordingfile,
+        "mikopbx_cdr_id": stmt.excluded.mikopbx_cdr_id,
         "miko_user_name": stmt.excluded.miko_user_name,
         "disposition": stmt.excluded.disposition,
     }

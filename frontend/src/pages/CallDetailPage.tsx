@@ -127,6 +127,11 @@ export function CallDetailPage() {
                   <LoaderCircle className="h-4 w-4 animate-spin" />
                   Processing...
                 </>
+              ) : activeTranscription?.status === "PENDING" ? (
+                <>
+                  <Mic className="h-4 w-4" />
+                  Re-queue transcription
+                </>
               ) : (
                 <>
                   <Mic className="h-4 w-4" />
@@ -134,6 +139,12 @@ export function CallDetailPage() {
                 </>
               )}
             </Button>
+            {activeTranscription?.status === "PENDING" && (
+              <p className="text-xs text-muted-foreground">
+                Waiting for Celery worker. If CPU stays idle, run{" "}
+                <code className="rounded bg-muted px-1">docker compose ps celery-worker</code> on the server.
+              </p>
+            )}
           </CardContent>
         </Card>
 

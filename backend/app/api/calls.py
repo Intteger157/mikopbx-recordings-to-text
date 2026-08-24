@@ -20,6 +20,7 @@ from app.schemas import (
     TranscriptionSegment,
 )
 from app.services.call_service import apply_call_rbac_filter, get_call_for_user
+from app.services.recording_service import resolve_call_audio_url
 from app.services.sync_service import get_pbx_client
 from app.tasks.celery_app import celery_app
 
@@ -48,7 +49,7 @@ def _call_to_response(call: CallRecord, ext_map: dict[str, str] | None = None) -
         audio_url=call.audio_url,
         miko_user_name=call.miko_user_name,
         disposition=call.disposition,
-        has_audio=bool(call.audio_url),
+        has_audio=bool(call.audio_url or call.mikopbx_cdr_id),
         employee_name=_resolve_employee_name(call, ext_map),
         transcription_status=transcription_status,
     )
@@ -154,14 +155,19 @@ async def stream_call_audio(
     current_user: User = Depends(get_current_user),
 ):
     call = await get_call_for_user(db, call_id, current_user)
-    if not call or not call.audio_url:
+    if not call or (not call.audio_url and not call.mikopbx_cdr_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audio not found")
 
     client = await get_pbx_client(db)
     if not client:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="MikoPBX is not configured")
 
-    httpx_client, response = await client.stream_audio(call.audio_url)
+    try:
+        audio_url = await resolve_call_audio_url(db, client, call)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    httpx_client, response = await client.stream_audio(audio_url)
     media_type = response.headers.get("content-type") or mimetypes.guess_type(call.recordingfile or "")[0] or "audio/webm"
 
     async def iterator():
@@ -184,14 +190,23 @@ async def enqueue_transcription(
     call = await get_call_for_user(db, call_id, current_user)
     if not call:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Call not found")
-    if not call.audio_url:
+    if not call.audio_url and not call.mikopbx_cdr_id:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Call has no recording")
 
-    if call.transcription and call.transcription.status in {
-        TranscriptionStatus.PENDING,
-        TranscriptionStatus.PROCESSING,
-        TranscriptionStatus.COMPLETED,
-    }:
+    if call.transcription and call.transcription.status == TranscriptionStatus.COMPLETED:
+        return TranscriptionEnqueueResponse(
+            transcription_id=call.transcription.id,
+            status=call.transcription.status,
+        )
+
+    if call.transcription and call.transcription.status == TranscriptionStatus.PROCESSING:
+        return TranscriptionEnqueueResponse(
+            transcription_id=call.transcription.id,
+            status=call.transcription.status,
+        )
+
+    if call.transcription and call.transcription.status == TranscriptionStatus.PENDING:
+        celery_app.send_task("transcribe_call", args=[call.transcription.id])
         return TranscriptionEnqueueResponse(
             transcription_id=call.transcription.id,
             status=call.transcription.status,

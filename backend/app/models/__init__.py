@@ -70,6 +70,7 @@ class CallRecord(Base):
     billsec: Mapped[int] = mapped_column(Integer, default=0)
     audio_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     recordingfile: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    mikopbx_cdr_id: Mapped[int | None] = mapped_column(Integer, index=True, nullable=True)
     miko_user_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     disposition: Mapped[str | None] = mapped_column(String(64), nullable=True)
 

@@ -157,6 +157,16 @@ class MikoPBXClient:
 
         return legs, has_more, pagination
 
+    async def get_cdr_record(self, cdr_id: int) -> dict[str, Any]:
+        return await self._request("GET", f"/cdr/{cdr_id}", timeout=httpx.Timeout(60.0))
+
+    async def get_cdr_recording_url(self, cdr_id: int) -> str | None:
+        payload = await self.get_cdr_record(cdr_id)
+        record = payload.get("data")
+        if isinstance(record, dict):
+            return record.get("download_url") or record.get("playback_url")
+        return None
+
     async def get_cdr_page(
         self,
         date_from: datetime,
@@ -185,8 +195,15 @@ class MikoPBXClient:
 
     async def stream_audio(self, audio_path: str):
         url = self.resolve_audio_url(audio_path)
-        client = httpx.AsyncClient(timeout=120.0, verify=False)
+        timeout = httpx.Timeout(connect=15.0, read=180.0, write=30.0, pool=15.0)
+        client = httpx.AsyncClient(timeout=timeout, verify=False)
         request = client.build_request("GET", url, headers=self._headers())
         response = await client.send(request, stream=True)
+        if response.status_code >= 400 and "token=" in url:
+            await response.aclose()
+            await client.aclose()
+            client = httpx.AsyncClient(timeout=timeout, verify=False)
+            request = client.build_request("GET", url)
+            response = await client.send(request, stream=True)
         response.raise_for_status()
         return client, response
