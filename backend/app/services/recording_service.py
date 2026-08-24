@@ -9,6 +9,10 @@ from app.services.mikopbx_client import MikoPBXClient
 from app.utils.timezone import get_pbx_timezone
 
 
+LOOKUP_PAGE_SIZE = 100
+MAX_LOOKUP_PAGES = 10
+
+
 def _leg_uniqueid(leg: dict) -> str | None:
     return leg.get("UNIQUEID") or leg.get("uniqueid")
 
@@ -17,20 +21,7 @@ def _leg_recording_url(leg: dict) -> str | None:
     return MikoPBXClient.find_recording_url(leg)
 
 
-async def _lookup_cdr_leg(client: MikoPBXClient, call: CallRecord) -> dict | None:
-    """Find the CDR leg for this call to get a fresh recording token.
-
-    Kept to a single narrow page so audio requests never block for minutes.
-    """
-    tz = get_pbx_timezone()
-    center = call.call_date.astimezone(tz)
-    page = await client.get_cdr_page(
-        date_from=center - timedelta(minutes=15),
-        date_to=center + timedelta(minutes=15),
-        offset=0,
-        limit=100,
-    )
-    legs, _, _ = client.parse_cdr_page(page, limit=100)
+def _match_leg(legs: list[dict], call: CallRecord) -> dict | None:
     for leg in legs:
         if _leg_uniqueid(leg) == call.uniqueid:
             return leg
@@ -38,6 +29,54 @@ async def _lookup_cdr_leg(client: MikoPBXClient, call: CallRecord) -> dict | Non
         for leg in legs:
             if str(leg.get("id")) == str(call.mikopbx_cdr_id):
                 return leg
+    return None
+
+
+async def _lookup_cdr_leg(client: MikoPBXClient, call: CallRecord) -> dict | None:
+    """Find the CDR leg for this call to get a fresh recording token.
+
+    This PBX ignores the time part of ``dateFrom``/``dateTo`` and returns
+    nothing for a sub-day window, so search the whole call day and narrow it
+    down with the caller number instead.
+    """
+    tz = get_pbx_timezone()
+    local = call.call_date.astimezone(tz)
+    day_start = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_end = day_start + timedelta(days=1)
+
+    for src_num in (call.src_num, None):
+        offset = 0
+        last_id: int | None = None
+
+        for _ in range(MAX_LOOKUP_PAGES):
+            try:
+                page = await client.get_cdr_page(
+                    date_from=day_start,
+                    date_to=day_end,
+                    offset=offset,
+                    limit=LOOKUP_PAGE_SIZE,
+                    last_id=last_id,
+                    src_num=src_num,
+                )
+            except RuntimeError:
+                break
+
+            legs, has_more, pagination = client.parse_cdr_page(page, limit=LOOKUP_PAGE_SIZE)
+            if not legs:
+                break
+
+            match = _match_leg(legs, call)
+            if match:
+                return match
+            if not has_more:
+                break
+
+            offset += LOOKUP_PAGE_SIZE
+            last_id = pagination.get("lastId") if isinstance(pagination, dict) else None
+
+        if not src_num:
+            break
+
     return None
 
 
@@ -60,16 +99,12 @@ async def refresh_call_recording(
     client: MikoPBXClient,
     call: CallRecord,
 ) -> str | None:
-    if call.mikopbx_cdr_id:
-        try:
-            fresh_url = await client.get_cdr_recording_url(call.mikopbx_cdr_id)
-        except RuntimeError:
-            fresh_url = None
-        if fresh_url:
-            call.audio_url = _normalize_stored_url(client, fresh_url, call.recordingfile, call.mikopbx_cdr_id) or fresh_url
-            await db.commit()
-            return call.audio_url
+    """Get a usable recording URL, renewing the playback token when possible.
 
+    Tokens stored at sync time expire, so the CDR listing is the source of
+    truth; ``/cdr/{id}`` is only a fallback because some builds answer it with
+    an empty payload.
+    """
     try:
         leg = await _lookup_cdr_leg(client, call)
     except RuntimeError:
@@ -79,6 +114,16 @@ async def refresh_call_recording(
         fresh_url = _leg_recording_url(leg)
         if cdr_id is not None:
             call.mikopbx_cdr_id = int(cdr_id)
+        if fresh_url:
+            call.audio_url = _normalize_stored_url(client, fresh_url, call.recordingfile, call.mikopbx_cdr_id) or fresh_url
+            await db.commit()
+            return call.audio_url
+
+    if call.mikopbx_cdr_id:
+        try:
+            fresh_url = await client.get_cdr_recording_url(call.mikopbx_cdr_id)
+        except RuntimeError:
+            fresh_url = None
         if fresh_url:
             call.audio_url = _normalize_stored_url(client, fresh_url, call.recordingfile, call.mikopbx_cdr_id) or fresh_url
             await db.commit()

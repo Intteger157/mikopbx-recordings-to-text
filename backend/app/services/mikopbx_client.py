@@ -219,6 +219,7 @@ class MikoPBXClient:
         offset: int = 0,
         limit: int = 50,
         last_id: int | None = None,
+        src_num: str | None = None,
     ) -> dict[str, Any]:
         params: dict[str, Any] = {
             "dateFrom": date_from.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -229,6 +230,8 @@ class MikoPBXClient:
         }
         if last_id is not None:
             params["lastId"] = last_id
+        if src_num:
+            params["src_num"] = src_num
         return await self._request("GET", "/cdr", params=params, timeout=self._cdr_timeout)
 
     def _recording_headers(self) -> dict[str, str]:
