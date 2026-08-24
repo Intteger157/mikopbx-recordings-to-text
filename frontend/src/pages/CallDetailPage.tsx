@@ -4,6 +4,7 @@ import { Link, useParams } from "react-router-dom";
 import { format } from "date-fns";
 import { ArrowLeft, LoaderCircle, Mic } from "lucide-react";
 import api, { type CallRecordDetail, type Transcription } from "@/lib/api";
+import { getApiError } from "@/lib/errors";
 import { formatDuration, formatTimestamp, cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -17,11 +18,15 @@ export function CallDetailPage() {
   const audioRef = useRef<HTMLAudioElement>(null);
   const [currentTime, setCurrentTime] = useState(0);
 
-  const { data: call, isLoading } = useQuery({
+  const { data: call, isLoading, isError, error } = useQuery({
     queryKey: ["call", callId],
     queryFn: async () => (await api.get<CallRecordDetail>(`/calls/${callId}`)).data,
     enabled: Number.isFinite(callId),
   });
+
+  const { objectUrl: audioSrc, loading: audioLoading, error: audioError } = useAuthenticatedAudio(
+    call?.has_audio ? `/calls/${call.id}/audio` : undefined
+  );
 
   const { data: transcription } = useQuery({
     queryKey: ["transcription", callId],
@@ -62,14 +67,26 @@ export function CallDetailPage() {
     void audio.play();
   };
 
-  if (isLoading || !call) {
+  if (!Number.isFinite(callId)) {
+    return <p className="text-destructive">Invalid call ID.</p>;
+  }
+
+  if (isLoading) {
     return <div className="text-muted-foreground">Loading call details...</div>;
   }
 
+  if (isError || !call) {
+    return (
+      <div className="space-y-4">
+        <p className="text-destructive">{getApiError(error, "Call not found")}</p>
+        <Button asChild variant="outline">
+          <Link to="/calls">Back to Call Records</Link>
+        </Button>
+      </div>
+    );
+  }
+
   const activeTranscription = transcription ?? call.transcription;
-  const { objectUrl: audioSrc, loading: audioLoading, error: audioError } = useAuthenticatedAudio(
-    call.has_audio ? `/calls/${call.id}/audio` : undefined
-  );
 
   return (
     <div className="space-y-6">
