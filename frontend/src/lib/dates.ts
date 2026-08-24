@@ -1,6 +1,6 @@
 export function defaultFromDate(): string {
   const date = new Date();
-  date.setDate(date.getDate() - 30);
+  date.setDate(date.getDate() - 7);
   return formatLocalDate(date);
 }
 

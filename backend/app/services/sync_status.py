@@ -9,6 +9,7 @@ import redis
 from app.config import get_settings
 
 SYNC_STATUS_KEY = "whisper:pbx_sync_status"
+STALE_SYNC_SECONDS = 600
 
 
 def _redis_client() -> redis.Redis:
@@ -27,6 +28,7 @@ def default_status() -> dict[str, Any]:
         "error": None,
         "started_at": None,
         "finished_at": None,
+        "updated_at": None,
     }
 
 
@@ -38,6 +40,7 @@ def get_sync_status() -> dict[str, Any]:
 
 
 def start_sync() -> dict[str, Any]:
+    now = datetime.now(timezone.utc).isoformat()
     status = {
         "state": "running",
         "phase": "starting",
@@ -47,8 +50,9 @@ def start_sync() -> dict[str, Any]:
         "cdr_page": 0,
         "message": "Starting sync...",
         "error": None,
-        "started_at": datetime.now(timezone.utc).isoformat(),
+        "started_at": now,
         "finished_at": None,
+        "updated_at": now,
     }
     _redis_client().set(SYNC_STATUS_KEY, json.dumps(status), ex=7200)
     return status
@@ -59,6 +63,7 @@ def update_sync_status(**fields: Any) -> dict[str, Any]:
     if status.get("state") == "idle":
         status = start_sync()
     status.update(fields)
+    status["updated_at"] = datetime.now(timezone.utc).isoformat()
     _redis_client().set(SYNC_STATUS_KEY, json.dumps(status), ex=7200)
     return status
 
@@ -96,5 +101,47 @@ def fail_sync(error: str) -> dict[str, Any]:
     return status
 
 
+def _parse_iso(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def is_sync_stale(status: dict[str, Any] | None = None) -> bool:
+    status = status or get_sync_status()
+    if status.get("state") != "running":
+        return False
+    updated_at = _parse_iso(status.get("updated_at")) or _parse_iso(status.get("started_at"))
+    if updated_at is None:
+        return True
+    age = datetime.now(timezone.utc) - updated_at.astimezone(timezone.utc)
+    return age.total_seconds() > STALE_SYNC_SECONDS
+
+
+def reset_sync(message: str = "Sync cancelled") -> dict[str, Any]:
+    status = get_sync_status()
+    status.update(
+        {
+            "state": "failed",
+            "phase": "error",
+            "message": message,
+            "error": message,
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    _redis_client().set(SYNC_STATUS_KEY, json.dumps(status), ex=7200)
+    return status
+
+
 def is_sync_running() -> bool:
-    return get_sync_status().get("state") == "running"
+    status = get_sync_status()
+    if status.get("state") != "running":
+        return False
+    if is_sync_stale(status):
+        reset_sync("Sync timed out (no progress). You can start a new sync.")
+        return False
+    return True

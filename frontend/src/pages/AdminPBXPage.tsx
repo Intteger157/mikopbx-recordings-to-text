@@ -83,6 +83,21 @@ export function AdminPBXPage() {
     },
   });
 
+  const cancelSyncMutation = useMutation({
+    mutationFn: async () => (await api.post("/admin/pbx-config/sync/cancel")).data,
+    onSuccess: () => {
+      setIsError(false);
+      setMessage("Sync cancelled");
+      void queryClient.invalidateQueries({ queryKey: ["sync-status"] });
+    },
+  });
+
+  const syncAgeSeconds =
+    syncStatus?.updated_at != null
+      ? Math.floor((Date.now() - new Date(syncStatus.updated_at).getTime()) / 1000)
+      : null;
+  const syncLooksStuck = isSyncing && syncAgeSeconds != null && syncAgeSeconds > 120;
+
   const syncMutation = useMutation({
     mutationFn: async () =>
       (
@@ -170,7 +185,7 @@ export function AdminPBXPage() {
               <Label htmlFor="syncTo">To</Label>
               <Input id="syncTo" type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} />
             </div>
-            <div className="flex items-end">
+            <div className="flex items-end gap-2">
               <Button
                 className="w-full"
                 onClick={() => syncMutation.mutate()}
@@ -183,6 +198,15 @@ export function AdminPBXPage() {
                 )}
                 {isSyncing ? "Syncing..." : "Sync now"}
               </Button>
+              {isSyncing && (
+                <Button
+                  variant="outline"
+                  onClick={() => cancelSyncMutation.mutate()}
+                  disabled={cancelSyncMutation.isPending}
+                >
+                  Cancel
+                </Button>
+              )}
             </div>
           </div>
 
@@ -197,6 +221,12 @@ export function AdminPBXPage() {
               <p className="mt-2 text-muted-foreground">
                 You can open Call Records — new entries appear as sync progresses.
               </p>
+              {syncLooksStuck && (
+                <p className="mt-2 text-destructive">
+                  No progress for over 2 minutes. MikoPBX may be slow — try a shorter date range (3–7 days) or click
+                  Cancel and retry.
+                </p>
+              )}
             </div>
           )}
         </CardContent>

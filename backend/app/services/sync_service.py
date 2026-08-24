@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Callable
-from datetime import datetime, timezone
+from collections.abc import Callable, Iterator
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import select
@@ -33,12 +33,13 @@ def parse_call_date(value: str) -> datetime:
 
 
 def _leg_to_payload(leg: dict[str, Any], ext_map: dict[str, str]) -> dict[str, Any] | None:
-    recordingfile = leg.get("recordingfile")
-    playback_url = leg.get("playback_url") or leg.get("download_url")
+    audio_url = leg.get("download_url") or leg.get("playback_url")
     uniqueid = leg.get("UNIQUEID") or leg.get("uniqueid")
 
-    if not uniqueid or not recordingfile or not playback_url:
+    if not uniqueid or not audio_url:
         return None
+
+    recordingfile = leg.get("recordingfile")
 
     start = leg.get("_group_start") or leg.get("start")
     call_date = parse_call_date(start) if start else datetime.now(timezone.utc)
@@ -64,7 +65,7 @@ def _leg_to_payload(leg: dict[str, Any], ext_map: dict[str, str]) -> dict[str, A
         "dst_num": dst_str,
         "duration": int(leg.get("duration") or leg.get("_group_duration") or 0),
         "billsec": int(leg.get("billsec") or leg.get("_group_billsec") or 0),
-        "audio_url": playback_url,
+        "audio_url": audio_url,
         "recordingfile": recordingfile,
         "miko_user_name": employee_name or src_name or dst_name,
         "disposition": leg.get("disposition") or leg.get("_group_disposition"),
@@ -74,6 +75,17 @@ def _leg_to_payload(leg: dict[str, Any], ext_map: dict[str, str]) -> dict[str, A
 def _report(progress: ProgressCallback | None, **fields: Any) -> None:
     if progress:
         progress(fields)
+
+
+def _iter_date_chunks(date_from: datetime, date_to: datetime, chunk_days: int = 3) -> Iterator[tuple[datetime, datetime]]:
+    current = date_from
+    while current <= date_to:
+        chunk_end = min(current + timedelta(days=chunk_days) - timedelta(seconds=1), date_to)
+        yield current, chunk_end
+        next_start = chunk_end + timedelta(seconds=1)
+        if next_start > date_to:
+            break
+        current = next_start
 
 
 async def sync_extensions(
@@ -148,53 +160,78 @@ async def sync_cdr(
 ) -> tuple[int, int]:
     synced = 0
     skipped = 0
-    offset = 0
-    limit = 100
+    limit = 50
     page_num = 0
+    total_chunks = max(1, (date_to - date_from).days // 3 + 1)
+    chunk_index = 0
 
     ext_result = await db.execute(select(MikoPBXExtension))
     ext_map = {row.extension: row.display_name for row in ext_result.scalars()}
 
     _report(progress, phase="cdr", message="Fetching call recordings from MikoPBX...")
 
-    while True:
-        page_num += 1
-        _report(
-            progress,
-            phase="cdr",
-            cdr_page=page_num,
-            calls_synced=synced,
-            calls_skipped=skipped,
-            message=f"Fetching CDR page {page_num}...",
-        )
-
-        page = await client.get_cdr_page(date_from=date_from, date_to=date_to, offset=offset, limit=limit)
-        legs, has_more = client.parse_cdr_page(page, limit=limit)
-
-        batch: list[dict[str, Any]] = []
-        for leg in legs:
-            payload = _leg_to_payload(leg, ext_map)
-            if payload is None:
-                skipped += 1
-                continue
-            batch.append(payload)
-            synced += 1
-
-        await _upsert_call_batch(db, batch)
-        await db.commit()
+    for chunk_from, chunk_to in _iter_date_chunks(date_from, date_to, chunk_days=3):
+        chunk_index += 1
+        chunk_label = f"{chunk_from.date()} — {chunk_to.date()}"
+        offset = 0
+        last_id: int | None = None
 
         _report(
             progress,
             phase="cdr",
-            cdr_page=page_num,
-            calls_synced=synced,
-            calls_skipped=skipped,
-            message=f"Imported {synced} recordings so far (page {page_num})",
+            message=f"CDR period {chunk_index}/{total_chunks}: {chunk_label}",
         )
 
-        if not has_more:
-            break
-        offset += limit
+        while True:
+            page_num += 1
+            _report(
+                progress,
+                phase="cdr",
+                cdr_page=page_num,
+                calls_synced=synced,
+                calls_skipped=skipped,
+                message=f"Fetching CDR page {page_num} ({chunk_label})...",
+            )
+
+            page = await client.get_cdr_page(
+                date_from=chunk_from,
+                date_to=chunk_to,
+                offset=offset,
+                limit=limit,
+                last_id=last_id,
+            )
+            legs, has_more, pagination = client.parse_cdr_page(page, limit=limit)
+
+            batch: list[dict[str, Any]] = []
+            for leg in legs:
+                payload = _leg_to_payload(leg, ext_map)
+                if payload is None:
+                    skipped += 1
+                    continue
+                batch.append(payload)
+                synced += 1
+
+            await _upsert_call_batch(db, batch)
+            await db.commit()
+
+            _report(
+                progress,
+                phase="cdr",
+                cdr_page=page_num,
+                calls_synced=synced,
+                calls_skipped=skipped,
+                message=f"Imported {synced} recordings ({skipped} skipped) · page {page_num}",
+            )
+
+            if pagination and pagination.get("lastId") is not None:
+                try:
+                    last_id = int(pagination["lastId"])
+                except (TypeError, ValueError):
+                    last_id = None
+
+            if not has_more:
+                break
+            offset += limit
 
     config_result = await db.execute(select(MikoPBXConfig).where(MikoPBXConfig.id == 1))
     config = config_result.scalar_one()

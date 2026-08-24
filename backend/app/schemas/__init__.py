@@ -84,6 +84,7 @@ class PBXSyncStatusResponse(BaseModel):
     error: str | None = None
     started_at: str | None = None
     finished_at: str | None = None
+    updated_at: str | None = None
 
 
 class ExtensionResponse(BaseModel):

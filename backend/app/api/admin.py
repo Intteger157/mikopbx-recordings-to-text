@@ -16,7 +16,7 @@ from app.schemas import (
     PBXSyncResponse,
     PBXSyncStatusResponse,
 )
-from app.services.sync_status import get_sync_status, is_sync_running, start_sync
+from app.services.sync_status import get_sync_status, is_sync_running, reset_sync, start_sync
 from app.tasks.sync import sync_pbx_task
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -87,8 +87,15 @@ async def test_pbx_config(
 
 @router.get("/pbx-config/sync-status", response_model=PBXSyncStatusResponse)
 async def get_pbx_sync_status(_: User = Depends(require_roles(UserRole.SUPERADMIN))):
+    is_sync_running()
     status_data = get_sync_status()
     return PBXSyncStatusResponse(**status_data)
+
+
+@router.post("/pbx-config/sync/cancel")
+async def cancel_pbx_sync(_: User = Depends(require_roles(UserRole.SUPERADMIN))):
+    reset_sync("Sync cancelled by user")
+    return {"state": "cancelled", "message": "Sync cancelled"}
 
 
 @router.post("/pbx-config/sync", response_model=PBXSyncResponse)

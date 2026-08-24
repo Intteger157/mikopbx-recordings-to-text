@@ -39,6 +39,6 @@ async def _run_sync(date_from: str, date_to: str) -> dict:
         raise
 
 
-@celery_app.task(name="sync_pbx", bind=True, max_retries=0)
+@celery_app.task(name="sync_pbx", bind=True, max_retries=0, soft_time_limit=3600, time_limit=3660)
 def sync_pbx_task(self, date_from: str, date_to: str) -> dict:
     return asyncio.run(_run_sync(date_from, date_to))

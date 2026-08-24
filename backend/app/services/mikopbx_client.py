@@ -11,6 +11,8 @@ class MikoPBXClient:
         self.api_url = api_url.rstrip("/")
         self.api_key = api_key
         self.base_path = f"{self.api_url}/pbxcore/api/v3"
+        self._default_timeout = httpx.Timeout(connect=15.0, read=120.0, write=30.0, pool=15.0)
+        self._cdr_timeout = httpx.Timeout(connect=15.0, read=180.0, write=30.0, pool=15.0)
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -18,10 +20,17 @@ class MikoPBXClient:
             "Content-Type": "application/json",
         }
 
-    async def _request(self, method: str, path: str, timeout: float = 120.0, **kwargs) -> dict[str, Any]:
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        timeout: httpx.Timeout | float | None = None,
+        **kwargs,
+    ) -> dict[str, Any]:
         url = f"{self.base_path}{path}"
+        request_timeout = self._default_timeout if timeout is None else timeout
         try:
-            async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
+            async with httpx.AsyncClient(timeout=request_timeout, verify=False) as client:
                 response = await client.request(method, url, headers=self._headers(), **kwargs)
                 response.raise_for_status()
                 try:
@@ -31,6 +40,8 @@ class MikoPBXClient:
         except httpx.HTTPStatusError as exc:
             body = exc.response.text[:500]
             raise RuntimeError(f"MikoPBX HTTP {exc.response.status_code}: {body}") from exc
+        except httpx.TimeoutException as exc:
+            raise RuntimeError(f"MikoPBX request timed out ({path}): {exc}") from exc
         except httpx.RequestError as exc:
             raise RuntimeError(f"Cannot reach MikoPBX at {self.api_url}: {exc}") from exc
 
@@ -58,14 +69,14 @@ class MikoPBXClient:
         return []
 
     async def check_auth(self) -> bool:
-        await self._request("GET", "/system:checkAuth", timeout=30.0)
+        await self._request("GET", "/system:checkAuth", timeout=httpx.Timeout(30.0))
         return True
 
     async def get_employees_page(self, limit: int = 100, offset: int = 0, search: str = "") -> dict[str, Any]:
         params = {"limit": limit, "offset": offset}
         if search:
             params["search"] = search
-        return await self._request("GET", "/employees", params=params, timeout=60.0)
+        return await self._request("GET", "/employees", params=params, timeout=httpx.Timeout(60.0))
 
     async def get_all_employees(self) -> list[dict[str, Any]]:
         employees: list[dict[str, Any]] = []
@@ -83,9 +94,17 @@ class MikoPBXClient:
         return employees
 
     async def get_extensions_for_select(self) -> list[dict[str, Any]]:
-        data = await self._request("GET", "/extensions:getForSelect", timeout=60.0)
+        data = await self._request("GET", "/extensions:getForSelect", timeout=httpx.Timeout(60.0))
         items = data.get("data")
         return items if isinstance(items, list) else []
+
+    @staticmethod
+    def _extract_pagination(payload: dict[str, Any]) -> dict[str, Any] | None:
+        data = payload.get("data")
+        pagination = data.get("pagination") if isinstance(data, dict) else None
+        if pagination is None:
+            pagination = payload.get("pagination")
+        return pagination if isinstance(pagination, dict) else None
 
     @staticmethod
     def parse_cdr_page(payload: dict[str, Any], limit: int) -> tuple[list[dict[str, Any]], bool]:
@@ -129,33 +148,33 @@ class MikoPBXClient:
                 else:
                     legs.append(item)
 
-        pagination = None
-        if isinstance(data, dict):
-            pagination = data.get("pagination")
-        if pagination is None:
-            pagination = payload.get("pagination")
+        pagination = MikoPBXClient._extract_pagination(payload)
 
         if isinstance(pagination, dict):
             has_more = bool(pagination.get("hasMore"))
         else:
             has_more = len(legs) >= limit
 
-        return legs, has_more
+        return legs, has_more, pagination
 
     async def get_cdr_page(
         self,
         date_from: datetime,
         date_to: datetime,
         offset: int = 0,
-        limit: int = 100,
+        limit: int = 50,
+        last_id: int | None = None,
     ) -> dict[str, Any]:
-        params = {
+        params: dict[str, Any] = {
             "dateFrom": date_from.strftime("%Y-%m-%dT%H:%M:%S"),
             "dateTo": date_to.strftime("%Y-%m-%dT%H:%M:%S"),
             "offset": offset,
             "limit": limit,
+            "disposition": "ANSWERED",
         }
-        return await self._request("GET", "/cdr", params=params, timeout=300.0)
+        if last_id is not None:
+            params["lastId"] = last_id
+        return await self._request("GET", "/cdr", params=params, timeout=self._cdr_timeout)
 
     def resolve_audio_url(self, audio_path: str) -> str:
         if audio_path.startswith("http"):
