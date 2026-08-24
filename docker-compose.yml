@@ -2,15 +2,15 @@ services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: whisper
-      POSTGRES_PASSWORD: whisper
-      POSTGRES_DB: whisper
+      POSTGRES_USER: ${POSTGRES_USER:-whisper}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-whisper}
+      POSTGRES_DB: ${POSTGRES_DB:-whisper}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
       - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U whisper -d whisper"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-whisper} -d ${POSTGRES_DB:-whisper}"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -28,14 +28,14 @@ services:
   api:
     build: ./backend
     environment:
-      DATABASE_URL: postgresql+asyncpg://whisper:whisper@postgres:5432/whisper
-      DATABASE_URL_SYNC: postgresql+psycopg2://whisper:whisper@postgres:5432/whisper
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-whisper}:${POSTGRES_PASSWORD:-whisper}@postgres:5432/${POSTGRES_DB:-whisper}
+      DATABASE_URL_SYNC: postgresql+psycopg2://${POSTGRES_USER:-whisper}:${POSTGRES_PASSWORD:-whisper}@postgres:5432/${POSTGRES_DB:-whisper}
       REDIS_URL: redis://redis:6379/0
-      JWT_SECRET: change-me-in-production
-      CORS_ORIGINS: http://localhost:5173,http://localhost:3000
-      SUPERADMIN_USERNAME: admin
-      SUPERADMIN_EMAIL: admin@localhost
-      SUPERADMIN_PASSWORD: admin123
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+      SUPERADMIN_USERNAME: ${SUPERADMIN_USERNAME:-admin}
+      SUPERADMIN_EMAIL: ${SUPERADMIN_EMAIL:-admin@localhost}
+      SUPERADMIN_PASSWORD: ${SUPERADMIN_PASSWORD:-admin123}
     ports:
       - "8000:8000"
     healthcheck:
@@ -58,14 +58,14 @@ services:
     build: ./backend
     command: celery -A app.tasks.celery_app worker --loglevel=info --concurrency=1
     environment:
-      DATABASE_URL: postgresql+asyncpg://whisper:whisper@postgres:5432/whisper
-      DATABASE_URL_SYNC: postgresql+psycopg2://whisper:whisper@postgres:5432/whisper
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-whisper}:${POSTGRES_PASSWORD:-whisper}@postgres:5432/${POSTGRES_DB:-whisper}
+      DATABASE_URL_SYNC: postgresql+psycopg2://${POSTGRES_USER:-whisper}:${POSTGRES_PASSWORD:-whisper}@postgres:5432/${POSTGRES_DB:-whisper}
       REDIS_URL: redis://redis:6379/0
-      JWT_SECRET: change-me-in-production
-      WHISPER_MODEL: medium
-      WHISPER_DEVICE: cpu
-      WHISPER_COMPUTE_TYPE: int8
-      WHISPER_CPU_THREADS: 4
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      WHISPER_MODEL: ${WHISPER_MODEL:-medium}
+      WHISPER_DEVICE: ${WHISPER_DEVICE:-cpu}
+      WHISPER_COMPUTE_TYPE: ${WHISPER_COMPUTE_TYPE:-int8}
+      WHISPER_CPU_THREADS: ${WHISPER_CPU_THREADS:-4}
     volumes:
       - whisper_models:/root/.cache/huggingface
     depends_on:

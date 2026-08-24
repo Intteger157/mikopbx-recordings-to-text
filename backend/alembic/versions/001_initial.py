@@ -16,14 +16,31 @@ down_revision: Union[str, None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
+user_role = postgresql.ENUM("SUPERADMIN", "MANAGER", "USER", name="user_role", create_type=False)
+transcription_status = postgresql.ENUM(
+    "PENDING", "PROCESSING", "COMPLETED", "FAILED", name="transcription_status", create_type=False
+)
+
 
 def upgrade() -> None:
-    user_role = sa.Enum("SUPERADMIN", "MANAGER", "USER", name="user_role", create_type=False)
-    transcription_status = sa.Enum(
-        "PENDING", "PROCESSING", "COMPLETED", "FAILED", name="transcription_status", create_type=False
+    op.execute(
+        """
+        DO $$ BEGIN
+            CREATE TYPE user_role AS ENUM ('SUPERADMIN', 'MANAGER', 'USER');
+        EXCEPTION
+            WHEN duplicate_object THEN NULL;
+        END $$;
+        """
     )
-    user_role.create(op.get_bind(), checkfirst=True)
-    transcription_status.create(op.get_bind(), checkfirst=True)
+    op.execute(
+        """
+        DO $$ BEGIN
+            CREATE TYPE transcription_status AS ENUM ('PENDING', 'PROCESSING', 'COMPLETED', 'FAILED');
+        EXCEPTION
+            WHEN duplicate_object THEN NULL;
+        END $$;
+        """
+    )
 
     op.create_table(
         "users",
@@ -32,7 +49,7 @@ def upgrade() -> None:
         sa.Column("email", sa.String(length=255), nullable=False),
         sa.Column("hashed_password", sa.String(length=255), nullable=False),
         sa.Column("role", user_role, nullable=False),
-        sa.Column("is_active", sa.Boolean(), nullable=False),
+        sa.Column("is_active", sa.Boolean(), nullable=False, server_default=sa.text("true")),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
         sa.PrimaryKeyConstraint("id"),
     )
@@ -44,7 +61,7 @@ def upgrade() -> None:
         sa.Column("id", sa.Integer(), nullable=False),
         sa.Column("api_url", sa.String(length=512), nullable=True),
         sa.Column("api_key", sa.String(length=512), nullable=True),
-        sa.Column("is_connected", sa.Boolean(), nullable=False),
+        sa.Column("is_connected", sa.Boolean(), nullable=False, server_default=sa.text("false")),
         sa.Column("last_sync_at", sa.DateTime(timezone=True), nullable=True),
         sa.PrimaryKeyConstraint("id"),
     )
@@ -80,8 +97,8 @@ def upgrade() -> None:
         sa.Column("call_date", sa.DateTime(timezone=True), nullable=False),
         sa.Column("src_num", sa.String(length=64), nullable=True),
         sa.Column("dst_num", sa.String(length=64), nullable=True),
-        sa.Column("duration", sa.Integer(), nullable=False),
-        sa.Column("billsec", sa.Integer(), nullable=False),
+        sa.Column("duration", sa.Integer(), nullable=False, server_default=sa.text("0")),
+        sa.Column("billsec", sa.Integer(), nullable=False, server_default=sa.text("0")),
         sa.Column("audio_url", sa.String(length=1024), nullable=True),
         sa.Column("recordingfile", sa.String(length=1024), nullable=True),
         sa.Column("miko_user_name", sa.String(length=255), nullable=True),
@@ -129,5 +146,5 @@ def downgrade() -> None:
     op.drop_index(op.f("ix_users_username"), table_name="users")
     op.drop_index(op.f("ix_users_email"), table_name="users")
     op.drop_table("users")
-    sa.Enum(name="transcription_status").drop(op.get_bind(), checkfirst=True)
-    sa.Enum(name="user_role").drop(op.get_bind(), checkfirst=True)
+    op.execute("DROP TYPE IF EXISTS transcription_status")
+    op.execute("DROP TYPE IF EXISTS user_role")

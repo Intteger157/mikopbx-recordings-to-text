@@ -17,8 +17,12 @@ Full-stack web service for MikoPBX call recording sync, RBAC-gated playback, and
 ### Run
 
 ```bash
-docker compose up --build
+cp .env.example .env
+# Edit .env — set SUPERADMIN_PASSWORD, JWT_SECRET, CORS_ORIGINS (your server IP)
+docker compose up -d --build
 ```
+
+Secrets go in `.env`, not in `docker-compose.yml` — this avoids git pull conflicts on the server.
 
 Services:
 
