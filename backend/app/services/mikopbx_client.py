@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 
 class MikoPBXClient:
@@ -329,8 +332,11 @@ class MikoPBXClient:
                         errors.append(f"{url} -> only {len(data)} bytes ({content_type})")
                         continue
 
+                    logger.info("Recording downloaded from %s (%s, %d bytes)", url, content_type, len(data))
                     return data, content_type
 
+        for message in errors:
+            logger.warning("Recording download attempt failed: %s", message)
         detail = "; ".join(errors[-4:]) if errors else "no URLs tried"
         raise RuntimeError(f"Cannot download recording from MikoPBX: {detail}")
 

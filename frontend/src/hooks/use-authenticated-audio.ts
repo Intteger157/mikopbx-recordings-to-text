@@ -1,6 +1,30 @@
 import { useEffect, useState } from "react";
 import api from "@/lib/api";
 
+/** Blob responses keep the error envelope unparsed, so read it manually. */
+async function extractErrorDetail(error: unknown): Promise<string> {
+  const data = (error as { response?: { data?: unknown } })?.response?.data;
+
+  if (data instanceof Blob) {
+    try {
+      const text = await data.text();
+      const parsed = JSON.parse(text) as { detail?: string };
+      if (parsed.detail) return parsed.detail;
+      if (text) return text;
+    } catch {
+      // fall through to generic message
+    }
+  }
+
+  if (typeof data === "object" && data !== null && "detail" in data) {
+    const detail = (data as { detail?: unknown }).detail;
+    if (typeof detail === "string") return detail;
+  }
+
+  if (error instanceof Error && error.message) return error.message;
+  return "Failed to load audio";
+}
+
 export function useAuthenticatedAudio(url: string | undefined) {
   const [objectUrl, setObjectUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -24,14 +48,8 @@ export function useAuthenticatedAudio(url: string | undefined) {
         createdUrl = URL.createObjectURL(response.data);
         setObjectUrl(createdUrl);
       } catch (err) {
+        const detail = await extractErrorDetail(err);
         if (active) {
-          const detail =
-            typeof err === "object" &&
-            err !== null &&
-            "response" in err &&
-            typeof (err as { response?: { data?: { detail?: string } } }).response?.data?.detail === "string"
-              ? (err as { response: { data: { detail: string } } }).response.data.detail
-              : "Failed to load audio";
           setError(detail);
           setObjectUrl(null);
         }

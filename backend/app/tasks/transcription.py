@@ -5,6 +5,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+from celery.signals import worker_ready
 from faster_whisper import WhisperModel
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
@@ -99,3 +100,20 @@ async def _run_transcription(transcription_id: int) -> None:
 @celery_app.task(name="transcribe_call", bind=True, max_retries=0, soft_time_limit=3600, time_limit=3660)
 def transcribe_call(self, transcription_id: int) -> None:
     asyncio.run(_run_transcription(transcription_id))
+
+
+async def _release_orphaned_transcriptions() -> None:
+    async with async_session() as db:
+        result = await db.execute(
+            select(Transcription).where(Transcription.status == TranscriptionStatus.PROCESSING)
+        )
+        for transcription in result.scalars():
+            transcription.status = TranscriptionStatus.FAILED
+            transcription.error_message = "Worker restarted while transcribing. Press Transcribe to retry."
+        await db.commit()
+
+
+@worker_ready.connect
+def release_orphaned_transcriptions(**_kwargs) -> None:
+    """A killed worker leaves rows stuck in PROCESSING with nothing running."""
+    asyncio.run(_release_orphaned_transcriptions())
