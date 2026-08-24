@@ -219,6 +219,8 @@ async def stream_call_audio(
             audio_url,
             recordingfile=call.recordingfile,
             cdr_id=call.mikopbx_cdr_id,
+            read_timeout=25.0,
+            max_urls=2,
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc

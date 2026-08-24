@@ -18,6 +18,10 @@ def run_async_task(coro_factory: Callable[[], Awaitable[T]]) -> T:
 
     async def _runner() -> T:
         await engine.dispose()
-        return await coro_factory()
+        try:
+            return await coro_factory()
+        finally:
+            # Close pooled asyncpg connections while their loop is still alive.
+            await engine.dispose()
 
     return asyncio.run(_runner())
