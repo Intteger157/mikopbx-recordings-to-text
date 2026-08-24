@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse
@@ -12,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 class MikoPBXClient:
     MIN_RECORDING_BYTES = 2048
+    _TOKEN_IN_URL = re.compile(r"token=([a-f0-9]{32,64})", re.IGNORECASE)
 
     def __init__(self, api_url: str, api_key: str):
         self.api_url = api_url.rstrip("/")
@@ -207,11 +209,48 @@ class MikoPBXClient:
             return f"{self.api_url}{audio_path}"
         return f"{self.base_path}/{audio_path.lstrip('/')}"
 
-    @staticmethod
-    def extract_recording_token(audio_path: str) -> str | None:
+    @classmethod
+    def clean_recording_token(cls, raw: str) -> str:
+        """MikoPBX sometimes glues ``format=webm`` onto the token without ``&``."""
+        token = raw.strip()
+        lower = token.lower()
+        for marker in ("format=", "view=", "&"):
+            idx = lower.find(marker)
+            if idx > 0:
+                token = token[:idx]
+                lower = token.lower()
+        return token
+
+    @classmethod
+    def extract_recording_token(cls, audio_path: str) -> str | None:
+        if not audio_path:
+            return None
+
         parsed = urlparse(audio_path if "://" in audio_path else f"https://x{audio_path}")
         tokens = parse_qs(parsed.query).get("token")
-        return tokens[0] if tokens else None
+        if tokens and tokens[0]:
+            return cls.clean_recording_token(tokens[0])
+
+        match = cls._TOKEN_IN_URL.search(audio_path)
+        return cls.clean_recording_token(match.group(1)) if match else None
+
+    @staticmethod
+    def _recording_format(recordingfile: str | None) -> str | None:
+        if not recordingfile:
+            return None
+        suffix = recordingfile.rsplit(".", 1)[-1].lower()
+        return suffix if suffix in {"mp3", "wav", "webm", "ogg"} else None
+
+    def build_recording_download_url(
+        self,
+        token: str,
+        recordingfile: str | None = None,
+    ) -> str:
+        params: dict[str, str] = {"token": self.clean_recording_token(token)}
+        fmt = self._recording_format(recordingfile)
+        if fmt:
+            params["format"] = fmt
+        return f"{self.base_path}/cdr/download?{urlencode(params)}"
 
     def build_recording_download_urls(
         self,
@@ -219,32 +258,19 @@ class MikoPBXClient:
         recordingfile: str | None = None,
         cdr_id: int | None = None,
     ) -> list[str]:
-        """Build candidate URLs for MikoPBX recording download/playback APIs.
-
-        The deprecated ``view`` parameter is intentionally omitted: MikoPBX
-        answers with a JSON error envelope when it is combined with ``token``.
-        """
-        candidates: list[str] = []
+        """Return a short list of well-formed download URLs (Bearer required)."""
         token = self.extract_recording_token(audio_path)
-        fmt = None
-        if recordingfile:
-            suffix = recordingfile.rsplit(".", 1)[-1].lower()
-            if suffix in {"mp3", "wav", "webm", "ogg"}:
-                fmt = suffix
+        if not token:
+            return [self.resolve_audio_url(audio_path)]
 
-        if token:
-            plain = urlencode({"token": token})
-            with_format = urlencode({"token": token, "format": fmt}) if fmt else None
-
-            for query in filter(None, (plain, with_format)):
-                candidates.append(f"{self.base_path}/cdr/download?{query}")
-                candidates.append(f"{self.base_path}/cdr:download?{query}")
-                candidates.append(f"{self.base_path}/cdr/playback?{query}")
-                candidates.append(f"{self.base_path}/cdr:playback?{query}")
-                if cdr_id is not None:
-                    candidates.append(f"{self.base_path}/cdr/{cdr_id}:download?{query}")
-
-        candidates.append(self.resolve_audio_url(audio_path))
+        primary = self.build_recording_download_url(token, recordingfile)
+        candidates = [
+            primary,
+            f"{self.base_path}/cdr:download?{urlencode({'token': self.clean_recording_token(token)})}",
+        ]
+        if cdr_id is not None:
+            q = urlencode({"token": self.clean_recording_token(token)})
+            candidates.append(f"{self.base_path}/cdr/{cdr_id}:download?{q}")
 
         unique: list[str] = []
         seen: set[str] = set()
@@ -309,35 +335,35 @@ class MikoPBXClient:
         cdr_id: int | None = None,
     ) -> tuple[bytes, str | None]:
         urls = self.build_recording_download_urls(audio_path, recordingfile, cdr_id)
-        timeout = httpx.Timeout(connect=10.0, read=30.0, write=20.0, pool=10.0)
+        timeout = httpx.Timeout(connect=10.0, read=20.0, write=10.0, pool=10.0)
         errors: list[str] = []
+        headers = self._recording_headers()
 
         async with httpx.AsyncClient(timeout=timeout, verify=False, follow_redirects=True) as client:
             for url in urls:
-                for headers in (self._recording_headers(), {}):
-                    try:
-                        data, content_type, http_status = await self._read_recording_body(client, url, headers)
-                    except httpx.HTTPError as exc:
-                        errors.append(f"{url} -> {type(exc).__name__}: {exc}")
-                        continue
+                try:
+                    data, content_type, http_status = await self._read_recording_body(client, url, headers)
+                except httpx.HTTPError as exc:
+                    errors.append(f"{url} -> {type(exc).__name__}")
+                    continue
 
-                    if http_status >= 400:
-                        errors.append(f"{url} -> HTTP {http_status}")
-                        continue
-                    if self._is_json_or_html(content_type, data):
-                        snippet = data[:200].decode("utf-8", errors="replace")
-                        errors.append(f"{url} -> {content_type}: {snippet}")
-                        continue
-                    if len(data) < self.MIN_RECORDING_BYTES:
-                        errors.append(f"{url} -> only {len(data)} bytes ({content_type})")
-                        continue
+                if http_status >= 400:
+                    errors.append(f"{url} -> HTTP {http_status}")
+                    continue
+                if self._is_json_or_html(content_type, data):
+                    snippet = data[:200].decode("utf-8", errors="replace")
+                    errors.append(f"{url} -> {content_type}: {snippet}")
+                    continue
+                if len(data) < self.MIN_RECORDING_BYTES:
+                    errors.append(f"{url} -> only {len(data)} bytes")
+                    continue
 
-                    logger.info("Recording downloaded from %s (%s, %d bytes)", url, content_type, len(data))
-                    return data, content_type
+                logger.info("Recording downloaded from %s (%s, %d bytes)", url, content_type, len(data))
+                return data, content_type
 
         for message in errors:
             logger.warning("Recording download attempt failed: %s", message)
-        detail = "; ".join(errors[-4:]) if errors else "no URLs tried"
+        detail = "; ".join(errors) if errors else "no URLs tried"
         raise RuntimeError(f"Cannot download recording from MikoPBX: {detail}")
 
     async def probe_recording_urls(
@@ -352,20 +378,20 @@ class MikoPBXClient:
         results: list[dict[str, Any]] = []
 
         async with httpx.AsyncClient(timeout=timeout, verify=False, follow_redirects=True) as client:
+            headers = self._recording_headers()
             for url in urls:
-                for auth_mode, headers in (("bearer", self._recording_headers()), ("token only", {})):
-                    entry: dict[str, Any] = {"url": url, "auth": auth_mode}
-                    try:
-                        data, content_type, http_status = await self._read_recording_body(client, url, headers)
-                        entry["status"] = http_status
-                        entry["content_type"] = content_type
-                        entry["bytes"] = len(data)
-                        if self._is_json_or_html(content_type, data) or len(data) < self.MIN_RECORDING_BYTES:
-                            entry["usable"] = False
-                            entry["body"] = data[:300].decode("utf-8", errors="replace")
-                        else:
-                            entry["usable"] = True
-                    except httpx.HTTPError as exc:
-                        entry["error"] = f"{type(exc).__name__}: {exc}"
-                    results.append(entry)
+                entry: dict[str, Any] = {"url": url, "auth": "bearer"}
+                try:
+                    data, content_type, http_status = await self._read_recording_body(client, url, headers)
+                    entry["status"] = http_status
+                    entry["content_type"] = content_type
+                    entry["bytes"] = len(data)
+                    if self._is_json_or_html(content_type, data) or len(data) < self.MIN_RECORDING_BYTES:
+                        entry["usable"] = False
+                        entry["body"] = data[:300].decode("utf-8", errors="replace")
+                    else:
+                        entry["usable"] = True
+                except httpx.HTTPError as exc:
+                    entry["error"] = f"{type(exc).__name__}: {exc}"
+                results.append(entry)
         return results
