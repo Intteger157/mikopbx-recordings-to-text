@@ -245,12 +245,21 @@ class MikoPBXClient:
         self,
         token: str,
         recordingfile: str | None = None,
+        cdr_id: int | None = None,
     ) -> str:
+        """Build a colon-action URL.
+
+        ``/cdr/download`` (slash) is routed to ``getRecord(id=download)`` on
+        MikoPBX and returns JSON — never use it for file download.
+        """
         params: dict[str, str] = {"token": self.clean_recording_token(token)}
         fmt = self._recording_format(recordingfile)
         if fmt:
             params["format"] = fmt
-        return f"{self.base_path}/cdr/download?{urlencode(params)}"
+        query = urlencode(params)
+        if cdr_id is not None:
+            return f"{self.base_path}/cdr/{cdr_id}:download?{query}"
+        return f"{self.base_path}/cdr:download?{query}"
 
     def build_recording_download_urls(
         self,
@@ -258,19 +267,29 @@ class MikoPBXClient:
         recordingfile: str | None = None,
         cdr_id: int | None = None,
     ) -> list[str]:
-        """Return a short list of well-formed download URLs (Bearer required)."""
+        """Return colon-action download URLs (Bearer required)."""
         token = self.extract_recording_token(audio_path)
         if not token:
-            return [self.resolve_audio_url(audio_path)]
+            resolved = self.resolve_audio_url(audio_path)
+            return [resolved] if resolved else []
 
-        primary = self.build_recording_download_url(token, recordingfile)
-        candidates = [
-            primary,
-            f"{self.base_path}/cdr:download?{urlencode({'token': self.clean_recording_token(token)})}",
-        ]
+        clean = self.clean_recording_token(token)
+        fmt = self._recording_format(recordingfile)
+        with_fmt = urlencode({"token": clean, **({"format": fmt} if fmt else {})})
+        plain = urlencode({"token": clean})
+
+        candidates: list[str] = []
+
+        # Prefer the exact URL shape MikoPBX returns in CDR rows.
+        if audio_path and (":download" in audio_path or ":playback" in audio_path):
+            candidates.append(self.resolve_audio_url(audio_path))
+
         if cdr_id is not None:
-            q = urlencode({"token": self.clean_recording_token(token)})
-            candidates.append(f"{self.base_path}/cdr/{cdr_id}:download?{q}")
+            candidates.append(f"{self.base_path}/cdr/{cdr_id}:download?{with_fmt}")
+            candidates.append(f"{self.base_path}/cdr/{cdr_id}:download?{plain}")
+
+        candidates.append(f"{self.base_path}/cdr:download?{with_fmt}")
+        candidates.append(f"{self.base_path}/cdr:download?{plain}")
 
         unique: list[str] = []
         seen: set[str] = set()
@@ -294,39 +313,27 @@ class MikoPBXClient:
         url: str,
         headers: dict[str, str],
     ) -> tuple[bytes, str | None, int]:
-        """Read a recording body, tolerating servers that keep the socket open.
-
-        MikoPBX streams recordings with HTTP Range support and does not always
-        close the connection, so a plain read would block until timeout. We stop
-        as soon as the advertised length is reached and accept whatever arrived
-        if the stream stalls afterwards.
-        """
-        request_headers = {**headers, "Range": "bytes=0-"}
-        async with client.stream("GET", url, headers=request_headers) as response:
+        async with client.stream("GET", url, headers=headers) as response:
             status = response.status_code
             content_type = response.headers.get("content-type")
             if status >= 400:
+                await response.aread()
                 return b"", content_type, status
 
-            expected = response.headers.get("content-length")
-            try:
-                expected_bytes = int(expected) if expected else None
-            except ValueError:
-                expected_bytes = None
+            content_length = response.headers.get("content-length")
+            target = int(content_length) if content_length and content_length.isdigit() else None
 
-            buffer = bytearray()
-            try:
-                async for chunk in response.aiter_bytes(chunk_size=64 * 1024):
-                    buffer += chunk
-                    if expected_bytes is not None and len(buffer) >= expected_bytes:
-                        break
-                    if len(buffer) > 200 * 1024 * 1024:
-                        break
-            except httpx.TimeoutException:
-                if len(buffer) < self.MIN_RECORDING_BYTES:
-                    raise
+            chunks: list[bytes] = []
+            total = 0
+            async for chunk in response.aiter_bytes(chunk_size=64 * 1024):
+                chunks.append(chunk)
+                total += len(chunk)
+                if target is not None and total >= target:
+                    break
+                if total > 100 * 1024 * 1024:
+                    break
 
-            return bytes(buffer), content_type, status
+            return b"".join(chunks), content_type, status
 
     async def fetch_recording_bytes(
         self,
@@ -335,7 +342,7 @@ class MikoPBXClient:
         cdr_id: int | None = None,
     ) -> tuple[bytes, str | None]:
         urls = self.build_recording_download_urls(audio_path, recordingfile, cdr_id)
-        timeout = httpx.Timeout(connect=10.0, read=20.0, write=10.0, pool=10.0)
+        timeout = httpx.Timeout(connect=10.0, read=60.0, write=20.0, pool=10.0)
         errors: list[str] = []
         headers = self._recording_headers()
 
@@ -374,7 +381,7 @@ class MikoPBXClient:
     ) -> list[dict[str, Any]]:
         """Try every candidate recording URL and report what MikoPBX answered."""
         urls = self.build_recording_download_urls(audio_path, recordingfile, cdr_id)
-        timeout = httpx.Timeout(connect=8.0, read=20.0, write=10.0, pool=8.0)
+        timeout = httpx.Timeout(connect=8.0, read=60.0, write=10.0, pool=8.0)
         results: list[dict[str, Any]] = []
 
         async with httpx.AsyncClient(timeout=timeout, verify=False, follow_redirects=True) as client:

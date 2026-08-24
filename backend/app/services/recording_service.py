@@ -37,11 +37,18 @@ async def _lookup_cdr_leg(client: MikoPBXClient, call: CallRecord) -> dict | Non
     return None
 
 
-def _normalize_stored_url(client: MikoPBXClient, raw_url: str | None, recordingfile: str | None) -> str | None:
+def _normalize_stored_url(
+    client: MikoPBXClient,
+    raw_url: str | None,
+    recordingfile: str | None,
+    cdr_id: int | None = None,
+) -> str | None:
     token = client.extract_recording_token(raw_url or "")
     if not token:
         return raw_url
-    return client.build_recording_download_url(token, recordingfile)
+    if raw_url and (":download" in raw_url or ":playback" in raw_url):
+        return client.resolve_audio_url(raw_url)
+    return client.build_recording_download_url(token, recordingfile, cdr_id)
 
 
 async def refresh_call_recording(
@@ -55,7 +62,7 @@ async def refresh_call_recording(
         except RuntimeError:
             fresh_url = None
         if fresh_url:
-            call.audio_url = _normalize_stored_url(client, fresh_url, call.recordingfile) or fresh_url
+            call.audio_url = _normalize_stored_url(client, fresh_url, call.recordingfile, call.mikopbx_cdr_id) or fresh_url
             await db.commit()
             return call.audio_url
 
@@ -69,11 +76,11 @@ async def refresh_call_recording(
         if cdr_id is not None:
             call.mikopbx_cdr_id = int(cdr_id)
         if fresh_url:
-            call.audio_url = _normalize_stored_url(client, fresh_url, call.recordingfile) or fresh_url
+            call.audio_url = _normalize_stored_url(client, fresh_url, call.recordingfile, call.mikopbx_cdr_id) or fresh_url
             await db.commit()
             return call.audio_url
 
-    normalized = _normalize_stored_url(client, call.audio_url, call.recordingfile)
+    normalized = _normalize_stored_url(client, call.audio_url, call.recordingfile, call.mikopbx_cdr_id)
     if normalized and normalized != call.audio_url:
         call.audio_url = normalized
         await db.commit()
