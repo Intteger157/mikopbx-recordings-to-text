@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import CallRecord, MikoPBXConfig, MikoPBXExtension
 from app.services.mikopbx_client import MikoPBXClient
+from app.utils.timezone import parse_pbx_local_datetime
 
 ProgressCallback = Callable[[dict[str, Any]], None]
 
@@ -23,13 +24,7 @@ async def get_pbx_client(db: AsyncSession) -> MikoPBXClient | None:
 
 
 def parse_call_date(value: str) -> datetime:
-    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
-        try:
-            dt = datetime.strptime(value, fmt)
-            return dt.replace(tzinfo=timezone.utc)
-        except ValueError:
-            continue
-    return datetime.now(timezone.utc)
+    return parse_pbx_local_datetime(value)
 
 
 def _leg_to_payload(leg: dict[str, Any], ext_map: dict[str, str]) -> dict[str, Any] | None:

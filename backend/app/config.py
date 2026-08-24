@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     WHISPER_COMPUTE_TYPE: str = "int8"
     WHISPER_CPU_THREADS: int = 4
 
+    # MikoPBX CDR timestamps are local PBX time without timezone suffix
+    PBX_TIMEZONE: str = "Europe/Moscow"
+
     SUPERADMIN_USERNAME: str = "admin"
     SUPERADMIN_EMAIL: str = "admin@example.com"
     SUPERADMIN_PASSWORD: str = "admin123"

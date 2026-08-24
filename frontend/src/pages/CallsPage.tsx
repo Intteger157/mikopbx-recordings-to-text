@@ -70,7 +70,7 @@ export function CallsPage() {
         <div>
           <h1 className="text-3xl font-bold tracking-tight">Call Records</h1>
           <p className="text-muted-foreground">
-            Recordings from the last 30 days
+            Recordings from the last 7 days
             {user?.role !== "SUPERADMIN" && user?.allowed_extensions.length
               ? ` · extensions: ${user.allowed_extensions.join(", ")}`
               : ""}

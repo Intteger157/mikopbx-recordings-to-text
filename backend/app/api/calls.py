@@ -22,6 +22,7 @@ from app.schemas import (
 from app.services.call_service import apply_call_rbac_filter, get_call_for_user
 from app.services.recording_service import resolve_call_audio_url
 from app.services.sync_service import get_pbx_client
+from app.utils.timezone import localize_naive_to_utc
 from app.tasks.celery_app import celery_app
 
 router = APIRouter(prefix="/api/calls", tags=["calls"])
@@ -96,6 +97,9 @@ async def list_calls(
         date_from = date_to - timedelta(days=30)
     elif date_to is None and date_from is not None:
         date_to = datetime.now(timezone.utc)
+
+    date_from = localize_naive_to_utc(date_from)
+    date_to = localize_naive_to_utc(date_to)
 
     stmt = stmt.where(CallRecord.call_date >= date_from)
     stmt = stmt.where(CallRecord.call_date <= date_to)

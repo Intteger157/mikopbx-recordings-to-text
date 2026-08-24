@@ -37,6 +37,7 @@ services:
       SUPERADMIN_USERNAME: ${SUPERADMIN_USERNAME:-admin}
       SUPERADMIN_EMAIL: ${SUPERADMIN_EMAIL:-admin@example.com}
       SUPERADMIN_PASSWORD: ${SUPERADMIN_PASSWORD:-admin123}
+      PBX_TIMEZONE: ${PBX_TIMEZONE:-Europe/Moscow}
     ports:
       - "8000:8000"
     healthcheck:
@@ -68,6 +69,7 @@ services:
       WHISPER_DEVICE: ${WHISPER_DEVICE:-cpu}
       WHISPER_COMPUTE_TYPE: ${WHISPER_COMPUTE_TYPE:-int8}
       WHISPER_CPU_THREADS: ${WHISPER_CPU_THREADS:-6}
+      PBX_TIMEZONE: ${PBX_TIMEZONE:-Europe/Moscow}
     volumes:
       - whisper_models:/root/.cache/huggingface
     healthcheck:
