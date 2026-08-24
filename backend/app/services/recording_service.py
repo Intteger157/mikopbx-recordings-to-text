@@ -1,16 +1,52 @@
 from __future__ import annotations
 
+from datetime import timedelta
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import CallRecord
 from app.services.mikopbx_client import MikoPBXClient
+from app.utils.timezone import get_pbx_timezone
 
 
-async def resolve_call_audio_url(
+def _leg_uniqueid(leg: dict) -> str | None:
+    return leg.get("UNIQUEID") or leg.get("uniqueid")
+
+
+def _leg_recording_url(leg: dict) -> str | None:
+    return leg.get("download_url") or leg.get("playback_url")
+
+
+async def _lookup_cdr_leg(client: MikoPBXClient, call: CallRecord) -> dict | None:
+    tz = get_pbx_timezone()
+    center = call.call_date.astimezone(tz)
+    window_start = center - timedelta(hours=2)
+    window_end = center + timedelta(hours=2)
+
+    offset = 0
+    limit = 100
+    for _ in range(5):
+        page = await client.get_cdr_page(
+            date_from=window_start,
+            date_to=window_end,
+            offset=offset,
+            limit=limit,
+        )
+        legs, has_more, _ = client.parse_cdr_page(page, limit=limit)
+        for leg in legs:
+            if _leg_uniqueid(leg) == call.uniqueid:
+                return leg
+        if not has_more:
+            break
+        offset += limit
+    return None
+
+
+async def refresh_call_recording(
     db: AsyncSession,
     client: MikoPBXClient,
     call: CallRecord,
-) -> str:
+) -> str | None:
     if call.mikopbx_cdr_id:
         fresh_url = await client.get_cdr_recording_url(call.mikopbx_cdr_id)
         if fresh_url:
@@ -18,7 +54,26 @@ async def resolve_call_audio_url(
             await db.commit()
             return fresh_url
 
-    if call.audio_url:
-        return call.audio_url
+    leg = await _lookup_cdr_leg(client, call)
+    if leg:
+        cdr_id = leg.get("id")
+        fresh_url = _leg_recording_url(leg)
+        if cdr_id is not None:
+            call.mikopbx_cdr_id = int(cdr_id)
+        if fresh_url:
+            call.audio_url = fresh_url
+            await db.commit()
+            return fresh_url
 
+    return call.audio_url
+
+
+async def resolve_call_audio_url(
+    db: AsyncSession,
+    client: MikoPBXClient,
+    call: CallRecord,
+) -> str:
+    url = await refresh_call_recording(db, client, call)
+    if url:
+        return url
     raise RuntimeError("Call recording URL is missing")

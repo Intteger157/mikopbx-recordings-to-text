@@ -18,6 +18,12 @@ export function CallDetailPage() {
   const audioRef = useRef<HTMLAudioElement>(null);
   const [currentTime, setCurrentTime] = useState(0);
 
+  const { data: workerStatus } = useQuery({
+    queryKey: ["worker-status"],
+    queryFn: async () => (await api.get<{ online: boolean; workers: string[] }>("/calls/worker-status")).data,
+    refetchInterval: 10_000,
+  });
+
   const { data: call, isLoading, isError, error } = useQuery({
     queryKey: ["call", callId],
     queryFn: async () => (await api.get<CallRecordDetail>(`/calls/${callId}`)).data,
@@ -141,8 +147,14 @@ export function CallDetailPage() {
             </Button>
             {activeTranscription?.status === "PENDING" && (
               <p className="text-xs text-muted-foreground">
-                Waiting for Celery worker. If CPU stays idle, run{" "}
-                <code className="rounded bg-muted px-1">docker compose ps celery-worker</code> on the server.
+                {workerStatus?.online ? (
+                  "Worker is online — transcription should start shortly."
+                ) : (
+                  <>
+                    Celery worker is <span className="text-destructive">offline</span>. On the server:{" "}
+                    <code className="rounded bg-muted px-1">docker compose up -d celery-worker</code>
+                  </>
+                )}
               </p>
             )}
           </CardContent>

@@ -2,7 +2,7 @@ import mimetypes
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -26,6 +26,22 @@ from app.utils.timezone import localize_naive_to_utc
 from app.tasks.celery_app import celery_app
 
 router = APIRouter(prefix="/api/calls", tags=["calls"])
+
+STALE_TRANSCRIPTION_MINUTES = 15
+
+
+def _mark_stale_pending(transcription: Transcription | None) -> Transcription | None:
+    if not transcription or transcription.status != TranscriptionStatus.PENDING:
+        return transcription
+    age = datetime.now(timezone.utc) - transcription.created_at.astimezone(timezone.utc)
+    if age.total_seconds() <= STALE_TRANSCRIPTION_MINUTES * 60:
+        return transcription
+    transcription.status = TranscriptionStatus.FAILED
+    transcription.error_message = (
+        "Transcription worker did not start. On the server run: "
+        "docker compose ps celery-worker && docker compose logs celery-worker --tail 30"
+    )
+    return transcription
 
 
 def _resolve_employee_name(call: CallRecord, ext_map: dict[str, str]) -> str | None:
@@ -136,6 +152,16 @@ async def list_calls(
     )
 
 
+@router.get("/worker-status")
+async def get_transcription_worker_status(_: User = Depends(get_current_user)):
+    try:
+        ping = celery_app.control.inspect(timeout=3.0).ping() or {}
+    except Exception:
+        ping = {}
+    workers = list(ping.keys())
+    return {"online": bool(workers), "workers": workers}
+
+
 @router.get("/{call_id}", response_model=CallRecordDetail)
 async def get_call(
     call_id: int,
@@ -145,6 +171,11 @@ async def get_call(
     call = await get_call_for_user(db, call_id, current_user)
     if not call:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Call not found")
+
+    if call.transcription:
+        _mark_stale_pending(call.transcription)
+        await db.commit()
+        await db.refresh(call)
 
     ext_result = await db.execute(select(MikoPBXExtension))
     ext_map = {row.extension: row.display_name for row in ext_result.scalars() if row.display_name}
@@ -168,21 +199,12 @@ async def stream_call_audio(
 
     try:
         audio_url = await resolve_call_audio_url(db, client, call)
+        audio_bytes, content_type = await client.fetch_recording_bytes(audio_url)
     except RuntimeError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
-    httpx_client, response = await client.stream_audio(audio_url)
-    media_type = response.headers.get("content-type") or mimetypes.guess_type(call.recordingfile or "")[0] or "audio/webm"
-
-    async def iterator():
-        try:
-            async for chunk in response.aiter_bytes():
-                yield chunk
-        finally:
-            await response.aclose()
-            await httpx_client.aclose()
-
-    return StreamingResponse(iterator(), media_type=media_type)
+    media_type = content_type or mimetypes.guess_type(call.recordingfile or "")[0] or "audio/mpeg"
+    return Response(content=audio_bytes, media_type=media_type)
 
 
 @router.post("/{call_id}/transcribe", response_model=TranscriptionEnqueueResponse)
@@ -241,4 +263,7 @@ async def get_transcription(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Call not found")
     if not call.transcription:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transcription not found")
+    _mark_stale_pending(call.transcription)
+    await db.commit()
+    await db.refresh(call.transcription)
     return _transcription_to_response(call.transcription)

@@ -193,6 +193,25 @@ class MikoPBXClient:
             return f"{self.api_url}{audio_path}"
         return f"{self.base_path}/{audio_path.lstrip('/')}"
 
+    async def fetch_recording_bytes(self, audio_path: str) -> tuple[bytes, str | None]:
+        url = self.resolve_audio_url(audio_path)
+        timeout = httpx.Timeout(connect=15.0, read=180.0, write=30.0, pool=15.0)
+        last_error: Exception | None = None
+
+        async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
+            for headers in (self._headers(), {}):
+                try:
+                    response = await client.get(url, headers=headers)
+                    if response.status_code >= 400:
+                        last_error = RuntimeError(f"MikoPBX audio HTTP {response.status_code}")
+                        continue
+                    content_type = response.headers.get("content-type")
+                    return response.content, content_type
+                except httpx.HTTPError as exc:
+                    last_error = exc
+
+        raise RuntimeError(f"Cannot download recording from MikoPBX: {last_error}")
+
     async def stream_audio(self, audio_path: str):
         url = self.resolve_audio_url(audio_path)
         timeout = httpx.Timeout(connect=15.0, read=180.0, write=30.0, pool=15.0)

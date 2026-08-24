@@ -23,9 +23,16 @@ export function useAuthenticatedAudio(url: string | undefined) {
         if (!active) return;
         createdUrl = URL.createObjectURL(response.data);
         setObjectUrl(createdUrl);
-      } catch {
+      } catch (err) {
         if (active) {
-          setError("Failed to load audio");
+          const detail =
+            typeof err === "object" &&
+            err !== null &&
+            "response" in err &&
+            typeof (err as { response?: { data?: { detail?: string } } }).response?.data?.detail === "string"
+              ? (err as { response: { data: { detail: string } } }).response.data.detail
+              : "Failed to load audio";
+          setError(detail);
           setObjectUrl(null);
         }
       } finally {
