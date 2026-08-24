@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
 
@@ -193,24 +194,83 @@ class MikoPBXClient:
             return f"{self.api_url}{audio_path}"
         return f"{self.base_path}/{audio_path.lstrip('/')}"
 
-    async def fetch_recording_bytes(self, audio_path: str) -> tuple[bytes, str | None]:
-        url = self.resolve_audio_url(audio_path)
+    @staticmethod
+    def extract_recording_token(audio_path: str) -> str | None:
+        parsed = urlparse(audio_path if "://" in audio_path else f"https://x{audio_path}")
+        tokens = parse_qs(parsed.query).get("token")
+        return tokens[0] if tokens else None
+
+    def build_recording_download_urls(self, audio_path: str, recordingfile: str | None = None) -> list[str]:
+        """Build candidate download URLs per MikoPBX API docs."""
+        candidates: list[str] = []
+        token = self.extract_recording_token(audio_path)
+        fmt = None
+        if recordingfile:
+            suffix = recordingfile.rsplit(".", 1)[-1].lower()
+            if suffix in {"mp3", "wav", "webm", "ogg"}:
+                fmt = suffix
+
+        if token:
+            params: dict[str, str] = {"token": token}
+            if fmt:
+                params["format"] = fmt
+            query = urlencode(params)
+            candidates.append(f"{self.base_path}/cdr/download?{query}")
+            candidates.append(f"{self.base_path}/cdr/playback?{query}")
+
+        candidates.append(self.resolve_audio_url(audio_path))
+
+        unique: list[str] = []
+        seen: set[str] = set()
+        for url in candidates:
+            if url not in seen:
+                seen.add(url)
+                unique.append(url)
+        return unique
+
+    @staticmethod
+    def _looks_like_audio(content_type: str | None, data: bytes) -> bool:
+        if len(data) < 128:
+            return False
+        if content_type:
+            lowered = content_type.lower()
+            if "json" in lowered or "text/html" in lowered:
+                return False
+            if lowered.startswith("audio/") or "octet-stream" in lowered:
+                return True
+        if data[:1] == b"{" or data[:1] == b"<":
+            return False
+        return True
+
+    async def fetch_recording_bytes(
+        self,
+        audio_path: str,
+        recordingfile: str | None = None,
+    ) -> tuple[bytes, str | None]:
+        urls = self.build_recording_download_urls(audio_path, recordingfile)
         timeout = httpx.Timeout(connect=15.0, read=180.0, write=30.0, pool=15.0)
-        last_error: Exception | None = None
+        errors: list[str] = []
 
         async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
-            for headers in (self._headers(), {}):
-                try:
-                    response = await client.get(url, headers=headers)
-                    if response.status_code >= 400:
-                        last_error = RuntimeError(f"MikoPBX audio HTTP {response.status_code}")
-                        continue
-                    content_type = response.headers.get("content-type")
-                    return response.content, content_type
-                except httpx.HTTPError as exc:
-                    last_error = exc
+            for url in urls:
+                for headers in ({}, self._headers()):
+                    try:
+                        response = await client.get(url, headers=headers)
+                        if response.status_code >= 400:
+                            errors.append(f"{url} -> HTTP {response.status_code}")
+                            continue
+                        content_type = response.headers.get("content-type")
+                        data = response.content
+                        if not self._looks_like_audio(content_type, data):
+                            snippet = data[:200].decode("utf-8", errors="replace")
+                            errors.append(f"{url} -> not audio ({content_type}): {snippet}")
+                            continue
+                        return data, content_type
+                    except httpx.HTTPError as exc:
+                        errors.append(f"{url} -> {exc}")
 
-        raise RuntimeError(f"Cannot download recording from MikoPBX: {last_error}")
+        detail = "; ".join(errors[-3:]) if errors else "no URLs tried"
+        raise RuntimeError(f"Cannot download recording from MikoPBX: {detail}")
 
     async def stream_audio(self, audio_path: str):
         url = self.resolve_audio_url(audio_path)

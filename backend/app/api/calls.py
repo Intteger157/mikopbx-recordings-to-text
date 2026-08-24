@@ -28,17 +28,32 @@ from app.tasks.celery_app import celery_app
 router = APIRouter(prefix="/api/calls", tags=["calls"])
 
 STALE_TRANSCRIPTION_MINUTES = 15
+STALE_PROCESSING_MINUTES = 5
 
 
-def _mark_stale_pending(transcription: Transcription | None) -> Transcription | None:
-    if not transcription or transcription.status != TranscriptionStatus.PENDING:
+def _mark_stale_transcription(transcription: Transcription | None) -> Transcription | None:
+    if not transcription:
         return transcription
-    age = datetime.now(timezone.utc) - transcription.created_at.astimezone(timezone.utc)
-    if age.total_seconds() <= STALE_TRANSCRIPTION_MINUTES * 60:
+    if transcription.status not in {TranscriptionStatus.PENDING, TranscriptionStatus.PROCESSING}:
         return transcription
+
+    updated_at = transcription.completed_at or transcription.created_at
+    age = datetime.now(timezone.utc) - updated_at.astimezone(timezone.utc)
+    limit_minutes = (
+        STALE_PROCESSING_MINUTES
+        if transcription.status == TranscriptionStatus.PROCESSING
+        else STALE_TRANSCRIPTION_MINUTES
+    )
+    if age.total_seconds() <= limit_minutes * 60:
+        return transcription
+
+    was_processing = transcription.status == TranscriptionStatus.PROCESSING
     transcription.status = TranscriptionStatus.FAILED
     transcription.error_message = (
-        "Transcription worker did not start. On the server run: "
+        "Transcription timed out while downloading or processing audio. "
+        "Check celery-worker logs and MikoPBX /cdr/download?token= API."
+        if was_processing
+        else "Transcription worker did not start. On the server run: "
         "docker compose ps celery-worker && docker compose logs celery-worker --tail 30"
     )
     return transcription
@@ -173,7 +188,7 @@ async def get_call(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Call not found")
 
     if call.transcription:
-        _mark_stale_pending(call.transcription)
+        _mark_stale_transcription(call.transcription)
         await db.commit()
         await db.refresh(call)
 
@@ -199,7 +214,10 @@ async def stream_call_audio(
 
     try:
         audio_url = await resolve_call_audio_url(db, client, call)
-        audio_bytes, content_type = await client.fetch_recording_bytes(audio_url)
+        audio_bytes, content_type = await client.fetch_recording_bytes(
+            audio_url,
+            recordingfile=call.recordingfile,
+        )
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
@@ -263,7 +281,7 @@ async def get_transcription(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Call not found")
     if not call.transcription:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transcription not found")
-    _mark_stale_pending(call.transcription)
+    _mark_stale_transcription(call.transcription)
     await db.commit()
     await db.refresh(call.transcription)
     return _transcription_to_response(call.transcription)

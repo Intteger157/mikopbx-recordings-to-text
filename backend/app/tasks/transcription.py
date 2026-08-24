@@ -65,7 +65,10 @@ async def _run_transcription(transcription_id: int) -> None:
             temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
             temp_path = Path(temp_file.name)
             temp_file.close()
-            audio_bytes, _ = await client.fetch_recording_bytes(audio_url)
+            audio_bytes, _ = await client.fetch_recording_bytes(
+                audio_url,
+                recordingfile=call.recordingfile,
+            )
             temp_path.write_bytes(audio_bytes)
 
             model = get_whisper_model()
