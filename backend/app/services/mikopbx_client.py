@@ -18,26 +18,54 @@ class MikoPBXClient:
             "Content-Type": "application/json",
         }
 
-    async def _request(self, method: str, path: str, **kwargs) -> dict[str, Any]:
+    async def _request(self, method: str, path: str, timeout: float = 120.0, **kwargs) -> dict[str, Any]:
         url = f"{self.base_path}{path}"
-        async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
-            response = await client.request(method, url, headers=self._headers(), **kwargs)
-            response.raise_for_status()
-            data = response.json()
-            if not data.get("result", True):
-                errors = data.get("messages", {}).get("error", [])
-                raise RuntimeError("; ".join(errors) if errors else "MikoPBX API error")
+        try:
+            async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
+                response = await client.request(method, url, headers=self._headers(), **kwargs)
+                response.raise_for_status()
+                try:
+                    data = response.json()
+                except ValueError as exc:
+                    raise RuntimeError(f"MikoPBX returned non-JSON response ({response.status_code})") from exc
+        except httpx.HTTPStatusError as exc:
+            body = exc.response.text[:500]
+            raise RuntimeError(f"MikoPBX HTTP {exc.response.status_code}: {body}") from exc
+        except httpx.RequestError as exc:
+            raise RuntimeError(f"Cannot reach MikoPBX at {self.api_url}: {exc}") from exc
+
+        if not data.get("result", True):
+            errors = data.get("messages", {}).get("error", [])
+            if isinstance(errors, list):
+                message = "; ".join(str(item) for item in errors if item)
+            else:
+                message = str(errors)
+            raise RuntimeError(message or "MikoPBX API error")
+        return data
+
+    @staticmethod
+    def _extract_list(payload: dict[str, Any]) -> list[dict[str, Any]]:
+        data = payload.get("data")
+        if isinstance(data, list):
             return data
+        if isinstance(data, dict):
+            inner = data.get("data")
+            if isinstance(inner, list):
+                return inner
+            records = data.get("records")
+            if isinstance(records, list):
+                return records
+        return []
 
     async def check_auth(self) -> bool:
-        await self._request("GET", "/system:checkAuth")
+        await self._request("GET", "/system:checkAuth", timeout=30.0)
         return True
 
     async def get_employees_page(self, limit: int = 100, offset: int = 0, search: str = "") -> dict[str, Any]:
         params = {"limit": limit, "offset": offset}
         if search:
             params["search"] = search
-        return await self._request("GET", "/employees", params=params)
+        return await self._request("GET", "/employees", params=params, timeout=60.0)
 
     async def get_all_employees(self) -> list[dict[str, Any]]:
         employees: list[dict[str, Any]] = []
@@ -45,7 +73,9 @@ class MikoPBXClient:
         limit = 100
         while True:
             data = await self.get_employees_page(limit=limit, offset=offset)
-            page_items = data.get("data", {}).get("data", [])
+            page_items = self._extract_list(data)
+            if not page_items:
+                break
             employees.extend(page_items)
             if len(page_items) < limit:
                 break
@@ -53,8 +83,9 @@ class MikoPBXClient:
         return employees
 
     async def get_extensions_for_select(self) -> list[dict[str, Any]]:
-        data = await self._request("GET", "/extensions:getForSelect")
-        return data.get("data", [])
+        data = await self._request("GET", "/extensions:getForSelect", timeout=60.0)
+        items = data.get("data")
+        return items if isinstance(items, list) else []
 
     async def get_cdr_page(
         self,
@@ -69,7 +100,7 @@ class MikoPBXClient:
             "offset": offset,
             "limit": limit,
         }
-        return await self._request("GET", "/cdr", params=params)
+        return await self._request("GET", "/cdr", params=params, timeout=300.0)
 
     def resolve_audio_url(self, audio_path: str) -> str:
         if audio_path.startswith("http"):

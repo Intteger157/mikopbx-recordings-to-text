@@ -4,6 +4,7 @@ import { CheckCircle2, RefreshCw } from "lucide-react";
 import { useState } from "react";
 import api, { type PBXConfig } from "@/lib/api";
 import { dateToApiEnd, dateToApiStart, defaultFromDate, defaultToDate } from "@/lib/dates";
+import { getApiError } from "@/lib/errors";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -16,6 +17,7 @@ export function AdminPBXPage() {
   const [dateFrom, setDateFrom] = useState(defaultFromDate);
   const [dateTo, setDateTo] = useState(defaultToDate);
   const [message, setMessage] = useState<string | null>(null);
+  const [isError, setIsError] = useState(false);
 
   const { data: config } = useQuery({
     queryKey: ["pbx-config"],
@@ -35,6 +37,7 @@ export function AdminPBXPage() {
         })
       ).data,
     onSuccess: () => {
+      setIsError(false);
       setMessage("Configuration saved");
       void queryClient.invalidateQueries({ queryKey: ["pbx-config"] });
     },
@@ -43,11 +46,13 @@ export function AdminPBXPage() {
   const testMutation = useMutation({
     mutationFn: async () => (await api.post("/admin/pbx-config/test")).data,
     onSuccess: (data: { message: string }) => {
+      setIsError(false);
       setMessage(data.message);
       void queryClient.invalidateQueries({ queryKey: ["pbx-config"] });
     },
-    onError: (error: { response?: { data?: { detail?: string } } }) => {
-      setMessage(error.response?.data?.detail ?? "Connection failed");
+    onError: (error: unknown) => {
+      setIsError(true);
+      setMessage(getApiError(error, "Connection failed"));
     },
   });
 
@@ -60,14 +65,16 @@ export function AdminPBXPage() {
         })
       ).data,
     onSuccess: (data: { extensions_synced: number; calls_synced: number; calls_skipped: number }) => {
+      setIsError(false);
       setMessage(
         `Synced ${data.extensions_synced} extensions and ${data.calls_synced} calls with recordings (${data.calls_skipped} skipped without recording).`
       );
       void queryClient.invalidateQueries({ queryKey: ["pbx-config"] });
       void queryClient.invalidateQueries({ queryKey: ["calls"] });
     },
-    onError: (error: { response?: { data?: { detail?: string } } }) => {
-      setMessage(error.response?.data?.detail ?? "Sync failed");
+    onError: (error: unknown) => {
+      setIsError(true);
+      setMessage(getApiError(error, "Sync failed"));
     },
   });
 
@@ -147,7 +154,7 @@ export function AdminPBXPage() {
         </CardContent>
       </Card>
 
-      {message && <p className="text-sm text-muted-foreground">{message}</p>}
+      {message && <p className={`text-sm ${isError ? "text-destructive" : "text-muted-foreground"}`}>{message}</p>}
     </div>
   );
 }

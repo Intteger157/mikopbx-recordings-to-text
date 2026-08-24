@@ -79,7 +79,12 @@ async def sync_cdr(
 
     while True:
         page = await client.get_cdr_page(date_from=date_from, date_to=date_to, offset=offset, limit=limit)
-        records = page.get("data", {}).get("records", [])
+        page_data = page.get("data")
+        if not isinstance(page_data, dict):
+            break
+        records = page_data.get("records", [])
+        if not isinstance(records, list):
+            records = []
 
         for group in records:
             group_start = group.get("start")
@@ -132,7 +137,7 @@ async def sync_cdr(
                     db.add(CallRecord(uniqueid=uniqueid, **payload))
                 synced += 1
 
-        pagination = page.get("data", {}).get("pagination", {})
+        pagination = page_data.get("pagination", {}) if isinstance(page_data, dict) else {}
         if not pagination.get("hasMore"):
             break
         offset += limit
