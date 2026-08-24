@@ -10,7 +10,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from app.config import get_settings
-from app.database import async_session, sync_session
+from app.database import async_session
+from app.database_sync import sync_session
 from app.models import Transcription
 from app.models.enums import TranscriptionStatus
 from app.services.recording_service import resolve_call_audio_url

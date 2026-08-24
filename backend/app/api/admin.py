@@ -17,7 +17,6 @@ from app.schemas import (
     PBXSyncStatusResponse,
 )
 from app.services.sync_status import get_sync_status, is_sync_running, reset_sync, start_sync
-from app.tasks.sync import sync_pbx_task
 from app.tasks.celery_app import celery_app
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -125,7 +124,10 @@ async def trigger_pbx_sync(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Sync already in progress")
 
     start_sync()
-    sync_pbx_task.delay(payload.date_from.isoformat(), payload.date_to.isoformat())
+    celery_app.send_task(
+        "sync_pbx",
+        args=[payload.date_from.isoformat(), payload.date_to.isoformat()],
+    )
     return PBXSyncResponse(state="started", message="Sync started in background")
 
 
