@@ -30,6 +30,10 @@ router = APIRouter(prefix="/api/calls", tags=["calls"])
 STALE_TRANSCRIPTION_MINUTES = 15
 # First run downloads the Whisper model, so allow a generous window
 STALE_PROCESSING_MINUTES = 40
+# MikoPBX caps every response at ~20 KB and the whole API at 180 requests per
+# minute, so the player only streams short recordings directly; longer ones are
+# served from the cache the transcription worker fills.
+PLAYER_RANGE_REQUEST_BUDGET = 60
 
 
 def _mark_stale_transcription(transcription: Transcription | None) -> Transcription | None:
@@ -220,6 +224,7 @@ async def stream_call_audio(
             call,
             read_timeout=25.0,
             max_urls=1,
+            max_range_requests=PLAYER_RANGE_REQUEST_BUDGET,
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc

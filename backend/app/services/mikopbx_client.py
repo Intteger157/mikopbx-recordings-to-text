@@ -3,11 +3,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from datetime import datetime
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
+
+from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -18,9 +21,7 @@ class MikoPBXClient:
     # stall; stay under that and pace requests to avoid HTTP 429.
     RESUME_CHUNK_BYTES = 16 * 1024
     RESUME_READ_TIMEOUT = 20.0
-    RESUME_PACE_SECONDS = 0.05
-    THROTTLED_PACE_SECONDS = 0.5
-    RATE_LIMIT_BACKOFF = (5.0, 10.0, 20.0, 40.0)
+    RATE_LIMIT_BACKOFF = (10.0, 30.0, 60.0, 60.0)
     MAX_RESUME_STALLS = 3
     MAX_RESUME_REQUESTS = 4000
     _TOKEN_IN_URL = re.compile(r"token=([a-f0-9]{32,64})", re.IGNORECASE)
@@ -31,6 +32,7 @@ class MikoPBXClient:
         self.base_path = f"{self.api_url}/pbxcore/api/v3"
         self._default_timeout = httpx.Timeout(connect=15.0, read=120.0, write=30.0, pool=15.0)
         self._cdr_timeout = httpx.Timeout(connect=15.0, read=180.0, write=30.0, pool=15.0)
+        self._min_request_interval = 60.0 / max(get_settings().PBX_REQUESTS_PER_MINUTE, 1)
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -415,6 +417,7 @@ class MikoPBXClient:
         url: str,
         headers: dict[str, str],
         read_timeout: float,
+        max_range_requests: int,
     ) -> tuple[bytes, dict[str, str], int]:
         """Download one recording URL, preferring ranged chunks.
 
@@ -429,7 +432,7 @@ class MikoPBXClient:
         if status == 206:
             total = self._parse_content_range_total(meta.get("content-range"))
             if total and len(data) < total:
-                data = await self._resume_recording(client, url, headers, data, total)
+                data = await self._resume_recording(client, url, headers, data, total, max_range_requests)
             return data, {**meta, "content-length": str(total or len(data))}, 200
 
         if status >= 400 and status != 416:
@@ -440,7 +443,7 @@ class MikoPBXClient:
         declared = meta.get("content-length")
         total = int(declared) if declared and declared.isdigit() else None
         if status < 400 and total and len(data) < total:
-            data = await self._resume_recording(client, url, headers, data, total)
+            data = await self._resume_recording(client, url, headers, data, total, max_range_requests)
         return data, meta, status
 
     async def _resume_recording(
@@ -450,22 +453,32 @@ class MikoPBXClient:
         headers: dict[str, str],
         data: bytes,
         total_size: int,
+        max_requests: int,
     ) -> bytes:
         """Finish a stalled download with small Range requests.
 
-        Large files need hundreds of chunks, which the PBX answers with HTTP 429,
-        so back off and keep going rather than failing the whole download.
+        MikoPBX allows 180 API requests per minute and cuts every response at
+        roughly 20 KB, so a large recording needs hundreds of chunks spread out
+        below that rate. Downloading 7 MB therefore takes a few minutes.
         """
         timeout = httpx.Timeout(connect=10.0, read=self.RESUME_READ_TIMEOUT, write=20.0, pool=10.0)
-        pace = self.RESUME_PACE_SECONDS
+        interval = self._min_request_interval
+        earliest_next = time.monotonic()
         stalled = 0
         rate_limited = 0
         requests = 0
 
         while len(data) < total_size and stalled < self.MAX_RESUME_STALLS:
-            if requests >= self.MAX_RESUME_REQUESTS:
-                logger.warning("Giving up resuming %s after %d range requests", url, requests)
-                break
+            if requests >= max_requests:
+                raise RuntimeError(
+                    f"Recording is too large to stream in {max_requests} requests "
+                    f"({len(data)}/{total_size} bytes); transcribe it to cache the file first"
+                )
+
+            wait = earliest_next - time.monotonic()
+            if wait > 0:
+                await asyncio.sleep(wait)
+            earliest_next = time.monotonic() + interval
 
             start = len(data)
             end = min(start + self.RESUME_CHUNK_BYTES, total_size) - 1
@@ -484,14 +497,16 @@ class MikoPBXClient:
                     break
                 delay = self.RATE_LIMIT_BACKOFF[rate_limited]
                 rate_limited += 1
-                pace = self.THROTTLED_PACE_SECONDS
+                interval *= 2
                 logger.warning(
-                    "MikoPBX rate limited the download at %d/%d bytes, waiting %.0fs",
+                    "MikoPBX rate limited the download at %d/%d bytes, waiting %.0fs then pacing at %.2fs",
                     len(data),
                     total_size,
                     delay,
+                    interval,
                 )
                 await asyncio.sleep(delay)
+                earliest_next = time.monotonic()
                 continue
 
             if status not in {200, 206} or not chunk:
@@ -504,10 +519,8 @@ class MikoPBXClient:
 
             data += chunk
             stalled = 0
-            if requests % 100 == 0:
+            if requests % 50 == 0:
                 logger.info("Downloading recording: %d/%d bytes in %d requests", len(data), total_size, requests)
-            if pace:
-                await asyncio.sleep(pace)
 
         if len(data) >= total_size:
             logger.info("Resumed recording download to %d bytes in %d range requests", len(data), requests)
@@ -520,12 +533,16 @@ class MikoPBXClient:
         cdr_id: int | None = None,
         read_timeout: float = 60.0,
         max_urls: int | None = None,
+        max_range_requests: int | None = None,
     ) -> tuple[bytes, str | None]:
         """Download a recording, trying each candidate URL in turn.
 
         ``read_timeout`` is per URL: the API keeps it short so the browser does
         not hang, while the transcription worker can afford to wait.
+        ``max_range_requests`` caps how much of the PBX rate limit one download
+        may spend, so the player cannot starve the transcription worker.
         """
+        request_budget = max_range_requests or self.MAX_RESUME_REQUESTS
         urls = self.build_recording_download_urls(audio_path, recordingfile, cdr_id)
         if max_urls is not None:
             urls = urls[:max_urls]
@@ -536,10 +553,15 @@ class MikoPBXClient:
         async with httpx.AsyncClient(timeout=timeout, verify=False, follow_redirects=True) as client:
             for url in urls:
                 try:
-                    data, meta, http_status = await self._download_recording(client, url, headers, read_timeout)
+                    data, meta, http_status = await self._download_recording(
+                        client, url, headers, read_timeout, request_budget
+                    )
                 except httpx.HTTPError as exc:
                     errors.append(f"{url} -> {type(exc).__name__}")
                     continue
+                except RuntimeError as exc:
+                    errors.append(f"{url} -> {exc}")
+                    break
 
                 content_type = meta.get("content-type")
                 described = ", ".join(f"{key}={value}" for key, value in meta.items()) or "no headers"

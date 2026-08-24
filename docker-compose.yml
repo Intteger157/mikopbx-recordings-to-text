@@ -38,6 +38,7 @@ services:
       SUPERADMIN_EMAIL: ${SUPERADMIN_EMAIL:-admin@example.com}
       SUPERADMIN_PASSWORD: ${SUPERADMIN_PASSWORD:-admin123}
       PBX_TIMEZONE: ${PBX_TIMEZONE:-Europe/Moscow}
+      PBX_REQUESTS_PER_MINUTE: ${PBX_REQUESTS_PER_MINUTE:-150}
     volumes:
       - recordings_cache:/app/recordings_cache
     ports:
@@ -72,6 +73,7 @@ services:
       WHISPER_COMPUTE_TYPE: ${WHISPER_COMPUTE_TYPE:-int8}
       WHISPER_CPU_THREADS: ${WHISPER_CPU_THREADS:-6}
       PBX_TIMEZONE: ${PBX_TIMEZONE:-Europe/Moscow}
+      PBX_REQUESTS_PER_MINUTE: ${PBX_REQUESTS_PER_MINUTE:-150}
     volumes:
       - whisper_models:/root/.cache/huggingface
       - recordings_cache:/app/recordings_cache

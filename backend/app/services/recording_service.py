@@ -159,6 +159,7 @@ async def fetch_call_recording(
     call: CallRecord,
     read_timeout: float = 60.0,
     max_urls: int | None = None,
+    max_range_requests: int | None = None,
 ) -> tuple[bytes, str | None]:
     """Return a call recording, downloading it from MikoPBX only once.
 
@@ -178,6 +179,7 @@ async def fetch_call_recording(
             cdr_id=call.mikopbx_cdr_id,
             read_timeout=read_timeout,
             max_urls=max_urls,
+            max_range_requests=max_range_requests,
         )
     except RuntimeError as exc:
         if not _is_expired_token_error(str(exc)):
@@ -194,6 +196,7 @@ async def fetch_call_recording(
             cdr_id=call.mikopbx_cdr_id,
             read_timeout=read_timeout,
             max_urls=max_urls,
+            max_range_requests=max_range_requests,
         )
 
     write_recording(call.id, call.recordingfile, data)

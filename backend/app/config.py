@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     JWT_EXPIRE_MINUTES: int = 60 * 24
 
     RECORDINGS_CACHE_DIR: str = "/app/recordings_cache"
+    # MikoPBX allows 180 API requests per minute (unified-security.lua), and a
+    # single large recording needs hundreds of ranged requests.
+    PBX_REQUESTS_PER_MINUTE: int = 150
 
     WHISPER_MODEL: str = "medium"
     WHISPER_DEVICE: str = "cpu"
