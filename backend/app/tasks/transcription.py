@@ -68,6 +68,7 @@ async def _run_transcription(transcription_id: int) -> None:
             audio_bytes, _ = await client.fetch_recording_bytes(
                 audio_url,
                 recordingfile=call.recordingfile,
+                cdr_id=call.mikopbx_cdr_id,
             )
             temp_path.write_bytes(audio_bytes)
 
