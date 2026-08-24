@@ -219,7 +219,7 @@ async def stream_call_audio(
             client,
             call,
             read_timeout=25.0,
-            max_urls=2,
+            max_urls=1,
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from datetime import datetime
@@ -13,11 +14,15 @@ logger = logging.getLogger(__name__)
 
 class MikoPBXClient:
     MIN_RECORDING_BYTES = 2048
+    # The PBX cuts every response at roughly 20 KB, so bigger chunks only buy a
+    # stall; stay under that and pace requests to avoid HTTP 429.
     RESUME_CHUNK_BYTES = 16 * 1024
-    MAX_RESUME_CHUNK_BYTES = 1024 * 1024
     RESUME_READ_TIMEOUT = 20.0
+    RESUME_PACE_SECONDS = 0.05
+    THROTTLED_PACE_SECONDS = 0.5
+    RATE_LIMIT_BACKOFF = (5.0, 10.0, 20.0, 40.0)
     MAX_RESUME_STALLS = 3
-    MAX_RESUME_REQUESTS = 800
+    MAX_RESUME_REQUESTS = 4000
     _TOKEN_IN_URL = re.compile(r"token=([a-f0-9]{32,64})", re.IGNORECASE)
 
     def __init__(self, api_url: str, api_key: str):
@@ -448,14 +453,13 @@ class MikoPBXClient:
     ) -> bytes:
         """Finish a stalled download with small Range requests.
 
-        MikoPBX advertises ``Accept-Ranges: bytes`` but stalls after roughly
-        20 KB on a single connection, so ask for chunks small enough to arrive
-        before the stall and stop once several requests make no progress.
+        Large files need hundreds of chunks, which the PBX answers with HTTP 429,
+        so back off and keep going rather than failing the whole download.
         """
         timeout = httpx.Timeout(connect=10.0, read=self.RESUME_READ_TIMEOUT, write=20.0, pool=10.0)
-        chunk_size = self.RESUME_CHUNK_BYTES
-        may_grow = True
+        pace = self.RESUME_PACE_SECONDS
         stalled = 0
+        rate_limited = 0
         requests = 0
 
         while len(data) < total_size and stalled < self.MAX_RESUME_STALLS:
@@ -464,8 +468,7 @@ class MikoPBXClient:
                 break
 
             start = len(data)
-            end = min(start + chunk_size, total_size) - 1
-            requested = end - start + 1
+            end = min(start + self.RESUME_CHUNK_BYTES, total_size) - 1
             range_headers = {**headers, "Range": f"bytes={start}-{end}"}
             requests += 1
 
@@ -473,6 +476,22 @@ class MikoPBXClient:
                 chunk, _, status = await self._read_recording_body(client, url, range_headers, timeout=timeout)
             except httpx.HTTPError:
                 stalled += 1
+                continue
+
+            if status == 429:
+                if rate_limited >= len(self.RATE_LIMIT_BACKOFF):
+                    logger.warning("MikoPBX kept rate limiting %s at %d/%d bytes", url, len(data), total_size)
+                    break
+                delay = self.RATE_LIMIT_BACKOFF[rate_limited]
+                rate_limited += 1
+                pace = self.THROTTLED_PACE_SECONDS
+                logger.warning(
+                    "MikoPBX rate limited the download at %d/%d bytes, waiting %.0fs",
+                    len(data),
+                    total_size,
+                    delay,
+                )
+                await asyncio.sleep(delay)
                 continue
 
             if status not in {200, 206} or not chunk:
@@ -485,13 +504,10 @@ class MikoPBXClient:
 
             data += chunk
             stalled = 0
-            if len(chunk) < requested:
-                # A short chunk means the throttle kicked in; stop probing bigger
-                # sizes so we never pay another stall timeout.
-                may_grow = False
-                chunk_size = self.RESUME_CHUNK_BYTES
-            elif may_grow:
-                chunk_size = min(chunk_size * 2, self.MAX_RESUME_CHUNK_BYTES)
+            if requests % 100 == 0:
+                logger.info("Downloading recording: %d/%d bytes in %d requests", len(data), total_size, requests)
+            if pace:
+                await asyncio.sleep(pace)
 
         if len(data) >= total_size:
             logger.info("Resumed recording download to %d bytes in %d range requests", len(data), requests)
@@ -531,6 +547,9 @@ class MikoPBXClient:
                 if http_status >= 400:
                     snippet = data[:200].decode("utf-8", errors="replace")
                     errors.append(f"{url} -> HTTP {http_status} ({described}): {snippet}")
+                    if http_status == 429:
+                        # Other URLs share the same limit, so stop hammering.
+                        break
                     continue
                 if self._is_json_or_html(content_type, data):
                     snippet = data[:200].decode("utf-8", errors="replace")

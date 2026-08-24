@@ -38,6 +38,8 @@ services:
       SUPERADMIN_EMAIL: ${SUPERADMIN_EMAIL:-admin@example.com}
       SUPERADMIN_PASSWORD: ${SUPERADMIN_PASSWORD:-admin123}
       PBX_TIMEZONE: ${PBX_TIMEZONE:-Europe/Moscow}
+    volumes:
+      - recordings_cache:/app/recordings_cache
     ports:
       - "8000:8000"
     healthcheck:
@@ -72,6 +74,7 @@ services:
       PBX_TIMEZONE: ${PBX_TIMEZONE:-Europe/Moscow}
     volumes:
       - whisper_models:/root/.cache/huggingface
+      - recordings_cache:/app/recordings_cache
     healthcheck:
       test:
         [
@@ -104,3 +107,4 @@ services:
 volumes:
   postgres_data:
   whisper_models:
+  recordings_cache:

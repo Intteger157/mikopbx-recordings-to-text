@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import CallRecord
 from app.services.mikopbx_client import MikoPBXClient
+from app.services.recording_cache import read_recording, write_recording
 from app.utils.timezone import get_pbx_timezone
 
 
@@ -159,14 +160,19 @@ async def fetch_call_recording(
     read_timeout: float = 60.0,
     max_urls: int | None = None,
 ) -> tuple[bytes, str | None]:
-    """Download a call recording, renewing the playback token once if needed.
+    """Return a call recording, downloading it from MikoPBX only once.
 
-    MikoPBX playback tokens are short lived, so a token stored at sync time is
-    usually rejected by the time somebody opens the call.
+    Playback tokens stored at sync time expire, so the token is renewed on
+    demand, and the downloaded file is cached because MikoPBX needs hundreds of
+    ranged requests per recording and rate limits them.
     """
+    cached = read_recording(call.id, call.recordingfile)
+    if cached:
+        return cached
+
     audio_url = await resolve_call_audio_url(db, client, call)
     try:
-        return await client.fetch_recording_bytes(
+        data, content_type = await client.fetch_recording_bytes(
             audio_url,
             recordingfile=call.recordingfile,
             cdr_id=call.mikopbx_cdr_id,
@@ -177,15 +183,18 @@ async def fetch_call_recording(
         if not _is_expired_token_error(str(exc)):
             raise
 
-    call.audio_url = None
-    refreshed = await refresh_call_recording(db, client, call)
-    if not refreshed or refreshed == audio_url:
-        raise RuntimeError("MikoPBX playback token expired and could not be renewed")
+        call.audio_url = None
+        refreshed = await refresh_call_recording(db, client, call)
+        if not refreshed or refreshed == audio_url:
+            raise RuntimeError("MikoPBX playback token expired and could not be renewed") from exc
 
-    return await client.fetch_recording_bytes(
-        refreshed,
-        recordingfile=call.recordingfile,
-        cdr_id=call.mikopbx_cdr_id,
-        read_timeout=read_timeout,
-        max_urls=max_urls,
-    )
+        data, content_type = await client.fetch_recording_bytes(
+            refreshed,
+            recordingfile=call.recordingfile,
+            cdr_id=call.mikopbx_cdr_id,
+            read_timeout=read_timeout,
+            max_urls=max_urls,
+        )
+
+    write_recording(call.id, call.recordingfile, data)
+    return data, content_type
