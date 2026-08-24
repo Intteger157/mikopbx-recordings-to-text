@@ -87,6 +87,61 @@ class MikoPBXClient:
         items = data.get("data")
         return items if isinstance(items, list) else []
 
+    @staticmethod
+    def parse_cdr_page(payload: dict[str, Any], limit: int) -> tuple[list[dict[str, Any]], bool]:
+        """Parse MikoPBX CDR response.
+
+        Supports:
+        - flat array in ``data`` (documented format)
+        - grouped ``data.records[]`` with nested ``records[]`` legs
+        """
+        data = payload.get("data")
+        legs: list[dict[str, Any]] = []
+
+        if isinstance(data, list):
+            legs = [item for item in data if isinstance(item, dict)]
+        elif isinstance(data, dict):
+            records = data.get("records", [])
+            if not isinstance(records, list):
+                records = []
+
+            for item in records:
+                if not isinstance(item, dict):
+                    continue
+                inner = item.get("records")
+                if isinstance(inner, list) and inner:
+                    for leg in inner:
+                        if isinstance(leg, dict):
+                            legs.append(
+                                {
+                                    **leg,
+                                    "_group_start": item.get("start"),
+                                    "_group_src": item.get("src_num"),
+                                    "_group_dst": item.get("dst_num"),
+                                    "_group_linkedid": item.get("linkedid"),
+                                    "_group_src_name": item.get("src_name"),
+                                    "_group_dst_name": item.get("dst_name"),
+                                    "_group_disposition": item.get("disposition"),
+                                    "_group_duration": item.get("totalDuration"),
+                                    "_group_billsec": item.get("totalBillsec"),
+                                }
+                            )
+                else:
+                    legs.append(item)
+
+        pagination = None
+        if isinstance(data, dict):
+            pagination = data.get("pagination")
+        if pagination is None:
+            pagination = payload.get("pagination")
+
+        if isinstance(pagination, dict):
+            has_more = bool(pagination.get("hasMore"))
+        else:
+            has_more = len(legs) >= limit
+
+        return legs, has_more
+
     async def get_cdr_page(
         self,
         date_from: datetime,

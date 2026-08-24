@@ -32,6 +32,45 @@ def parse_call_date(value: str) -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _leg_to_payload(leg: dict[str, Any], ext_map: dict[str, str]) -> dict[str, Any] | None:
+    recordingfile = leg.get("recordingfile")
+    playback_url = leg.get("playback_url") or leg.get("download_url")
+    uniqueid = leg.get("UNIQUEID") or leg.get("uniqueid")
+
+    if not uniqueid or not recordingfile or not playback_url:
+        return None
+
+    start = leg.get("_group_start") or leg.get("start")
+    call_date = parse_call_date(start) if start else datetime.now(timezone.utc)
+
+    src_num = leg.get("src_num") or leg.get("_group_src")
+    dst_num = leg.get("dst_num") or leg.get("_group_dst")
+    src_name = leg.get("src_name") or leg.get("_group_src_name")
+    dst_name = leg.get("dst_name") or leg.get("_group_dst_name")
+    src_str = str(src_num) if src_num is not None else None
+    dst_str = str(dst_num) if dst_num is not None else None
+
+    employee_name = None
+    for number in (src_str, dst_str):
+        if number and number in ext_map:
+            employee_name = ext_map[number]
+            break
+
+    return {
+        "uniqueid": uniqueid,
+        "linkedid": leg.get("linkedid") or leg.get("_group_linkedid"),
+        "call_date": call_date,
+        "src_num": src_str,
+        "dst_num": dst_str,
+        "duration": int(leg.get("duration") or leg.get("_group_duration") or 0),
+        "billsec": int(leg.get("billsec") or leg.get("_group_billsec") or 0),
+        "audio_url": playback_url,
+        "recordingfile": recordingfile,
+        "miko_user_name": employee_name or src_name or dst_name,
+        "disposition": leg.get("disposition") or leg.get("_group_disposition"),
+    }
+
+
 def _report(progress: ProgressCallback | None, **fields: Any) -> None:
     if progress:
         progress(fields)
@@ -130,63 +169,16 @@ async def sync_cdr(
         )
 
         page = await client.get_cdr_page(date_from=date_from, date_to=date_to, offset=offset, limit=limit)
-        page_data = page.get("data")
-        if not isinstance(page_data, dict):
-            break
-
-        records = page_data.get("records", [])
-        if not isinstance(records, list):
-            records = []
+        legs, has_more = client.parse_cdr_page(page, limit=limit)
 
         batch: list[dict[str, Any]] = []
-
-        for group in records:
-            group_start = group.get("start")
-            group_src = group.get("src_num")
-            group_dst = group.get("dst_num")
-            linkedid = group.get("linkedid")
-            legs = group.get("records", [])
-            if not isinstance(legs, list):
+        for leg in legs:
+            payload = _leg_to_payload(leg, ext_map)
+            if payload is None:
+                skipped += 1
                 continue
-
-            for leg in legs:
-                recordingfile = leg.get("recordingfile")
-                playback_url = leg.get("playback_url") or leg.get("download_url")
-                uniqueid = leg.get("UNIQUEID") or leg.get("uniqueid")
-
-                if not uniqueid or not recordingfile or not playback_url:
-                    skipped += 1
-                    continue
-
-                call_date = parse_call_date(group_start) if group_start else datetime.now(timezone.utc)
-                src_num = leg.get("src_num") or group_src
-                dst_num = leg.get("dst_num") or group_dst
-                src_name = group.get("src_name")
-                dst_name = group.get("dst_name")
-                src_str = str(src_num) if src_num is not None else None
-                dst_str = str(dst_num) if dst_num is not None else None
-                employee_name = None
-                for number in (src_str, dst_str):
-                    if number and number in ext_map:
-                        employee_name = ext_map[number]
-                        break
-
-                batch.append(
-                    {
-                        "uniqueid": uniqueid,
-                        "linkedid": linkedid,
-                        "call_date": call_date,
-                        "src_num": src_str,
-                        "dst_num": dst_str,
-                        "duration": int(leg.get("duration") or group.get("totalDuration") or 0),
-                        "billsec": int(leg.get("billsec") or group.get("totalBillsec") or 0),
-                        "audio_url": playback_url,
-                        "recordingfile": recordingfile,
-                        "miko_user_name": employee_name or src_name or dst_name,
-                        "disposition": leg.get("disposition") or group.get("disposition"),
-                    }
-                )
-                synced += 1
+            batch.append(payload)
+            synced += 1
 
         await _upsert_call_batch(db, batch)
         await db.commit()
@@ -200,8 +192,7 @@ async def sync_cdr(
             message=f"Imported {synced} recordings so far (page {page_num})",
         )
 
-        pagination = page_data.get("pagination", {})
-        if not isinstance(pagination, dict) or not pagination.get("hasMore"):
+        if not has_more:
             break
         offset += limit
 
