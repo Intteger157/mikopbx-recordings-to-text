@@ -309,12 +309,21 @@ class MikoPBXClient:
     _RESPONSE_HEADERS_OF_INTEREST = (
         "content-type",
         "content-length",
+        "content-range",
         "content-disposition",
         "transfer-encoding",
         "content-encoding",
         "accept-ranges",
         "server",
     )
+
+    @staticmethod
+    def _parse_content_range_total(value: str | None) -> int | None:
+        """Read the total size out of a ``bytes 0-16383/202798`` header."""
+        if not value:
+            return None
+        total = value.rpartition("/")[2].strip()
+        return int(total) if total.isdigit() else None
 
     async def _read_recording_body(
         self,
@@ -339,15 +348,17 @@ class MikoPBXClient:
                 if value
             }
             if status >= 400:
-                await response.aread()
-                return b"", meta, status
+                body = await response.aread()
+                return body[:2048], meta, status
 
             content_length = response.headers.get("content-length")
             target = int(content_length) if content_length and content_length.isdigit() else None
 
             total = 0
             try:
-                async for chunk in response.aiter_bytes(chunk_size=32 * 1024):
+                # chunk_size=None yields whatever arrived, so a stall mid-transfer
+                # still leaves us the bytes we already have.
+                async for chunk in response.aiter_bytes(chunk_size=None):
                     chunks.append(chunk)
                     total += len(chunk)
                     if target is not None and total >= target:
@@ -359,6 +370,40 @@ class MikoPBXClient:
                     raise
 
         return b"".join(chunks), meta, status
+
+    async def _download_recording(
+        self,
+        client: httpx.AsyncClient,
+        url: str,
+        headers: dict[str, str],
+        read_timeout: float,
+    ) -> tuple[bytes, dict[str, str], int]:
+        """Download one recording URL, preferring ranged chunks.
+
+        MikoPBX throttles a single response to roughly 20 KB but answers Range
+        requests instantly, so start with a small range and take the plain
+        stream only when ranges are refused.
+        """
+        probe_timeout = httpx.Timeout(connect=10.0, read=self.RESUME_READ_TIMEOUT, write=20.0, pool=10.0)
+        probe_headers = {**headers, "Range": f"bytes=0-{self.RESUME_CHUNK_BYTES - 1}"}
+        data, meta, status = await self._read_recording_body(client, url, probe_headers, timeout=probe_timeout)
+
+        if status == 206:
+            total = self._parse_content_range_total(meta.get("content-range"))
+            if total and len(data) < total:
+                data = await self._resume_recording(client, url, headers, data, total)
+            return data, {**meta, "content-length": str(total or len(data))}, 200
+
+        if status >= 400 and status != 416:
+            return data, meta, status
+
+        stream_timeout = httpx.Timeout(connect=10.0, read=read_timeout, write=20.0, pool=10.0)
+        data, meta, status = await self._read_recording_body(client, url, headers, timeout=stream_timeout)
+        declared = meta.get("content-length")
+        total = int(declared) if declared and declared.isdigit() else None
+        if status < 400 and total and len(data) < total:
+            data = await self._resume_recording(client, url, headers, data, total)
+        return data, meta, status
 
     async def _resume_recording(
         self,
@@ -376,6 +421,7 @@ class MikoPBXClient:
         """
         timeout = httpx.Timeout(connect=10.0, read=self.RESUME_READ_TIMEOUT, write=20.0, pool=10.0)
         chunk_size = self.RESUME_CHUNK_BYTES
+        may_grow = True
         stalled = 0
         requests = 0
 
@@ -406,11 +452,13 @@ class MikoPBXClient:
 
             data += chunk
             stalled = 0
-            # Grow while the PBX keeps up, back off when a chunk arrives short.
-            if len(chunk) >= requested:
+            if len(chunk) < requested:
+                # A short chunk means the throttle kicked in; stop probing bigger
+                # sizes so we never pay another stall timeout.
+                may_grow = False
+                chunk_size = self.RESUME_CHUNK_BYTES
+            elif may_grow:
                 chunk_size = min(chunk_size * 2, self.MAX_RESUME_CHUNK_BYTES)
-            else:
-                chunk_size = max(self.RESUME_CHUNK_BYTES, chunk_size // 2)
 
         if len(data) >= total_size:
             logger.info("Resumed recording download to %d bytes in %d range requests", len(data), requests)
@@ -439,7 +487,7 @@ class MikoPBXClient:
         async with httpx.AsyncClient(timeout=timeout, verify=False, follow_redirects=True) as client:
             for url in urls:
                 try:
-                    data, meta, http_status = await self._read_recording_body(client, url, headers)
+                    data, meta, http_status = await self._download_recording(client, url, headers, read_timeout)
                 except httpx.HTTPError as exc:
                     errors.append(f"{url} -> {type(exc).__name__}")
                     continue
@@ -448,7 +496,8 @@ class MikoPBXClient:
                 described = ", ".join(f"{key}={value}" for key, value in meta.items()) or "no headers"
 
                 if http_status >= 400:
-                    errors.append(f"{url} -> HTTP {http_status} ({described})")
+                    snippet = data[:200].decode("utf-8", errors="replace")
+                    errors.append(f"{url} -> HTTP {http_status} ({described}): {snippet}")
                     continue
                 if self._is_json_or_html(content_type, data):
                     snippet = data[:200].decode("utf-8", errors="replace")
@@ -457,9 +506,6 @@ class MikoPBXClient:
 
                 declared = meta.get("content-length")
                 total_size = int(declared) if declared and declared.isdigit() else None
-                if total_size and len(data) < total_size:
-                    data = await self._resume_recording(client, url, headers, data, total_size)
-
                 if len(data) < self.MIN_RECORDING_BYTES:
                     errors.append(f"{url} -> only {len(data)} bytes ({described})")
                     continue
@@ -489,18 +535,22 @@ class MikoPBXClient:
 
         async with httpx.AsyncClient(timeout=timeout, verify=False, follow_redirects=True) as client:
             headers = self._recording_headers()
+            # Probe with a small range so diagnostics answer fast even when the
+            # PBX throttles full responses.
+            probe_headers = {**headers, "Range": f"bytes=0-{self.RESUME_CHUNK_BYTES - 1}"}
             for url in urls:
-                entry: dict[str, Any] = {"url": url, "auth": "bearer"}
+                entry: dict[str, Any] = {"url": url, "auth": "bearer", "range": "bytes=0-16383"}
                 try:
-                    data, meta, http_status = await self._read_recording_body(client, url, headers)
+                    data, meta, http_status = await self._read_recording_body(client, url, probe_headers)
                     entry["status"] = http_status
                     entry["headers"] = meta
                     entry["bytes"] = len(data)
-                    if self._is_json_or_html(meta.get("content-type"), data) or len(data) < self.MIN_RECORDING_BYTES:
+                    entry["total_bytes"] = self._parse_content_range_total(meta.get("content-range"))
+                    if self._is_json_or_html(meta.get("content-type"), data) or not data:
                         entry["usable"] = False
                         entry["body"] = data[:300].decode("utf-8", errors="replace")
                     else:
-                        entry["usable"] = True
+                        entry["usable"] = http_status in {200, 206}
                 except httpx.HTTPError as exc:
                     entry["error"] = f"{type(exc).__name__}: {exc}"
                 results.append(entry)
